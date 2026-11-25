@@ -1,0 +1,17 @@
+[package]
+name = "paritybay"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Directory-backed 2+1 erasure-coded object cluster"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "paritybay"
+path = "src/main.rs"
+
+[[bench]]
+name = "hotspots"
+harness = false
