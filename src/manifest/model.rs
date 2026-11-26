@@ -207,6 +207,21 @@ pub struct UploadSession {
     pub placements: Vec<PlacementPlan>,
 }
 
+/// Durable record of one successful multipart publication, keyed by upload ID.
+/// It outlives the session reservation so a repeated `finish` can return the
+/// original receipt even after the object was replaced or deleted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Completion {
+    pub upload: u64,
+    pub key: String,
+    pub generation: u64,
+    pub bytes: u64,
+    pub stripes: usize,
+    pub condition: Condition,
+    pub replaced_generation: Option<u64>,
+    pub weaker_stripes: usize,
+}
+
 impl UploadSession {
     pub fn staged_bytes(&self) -> u64 {
         self.parts.values().map(|part| u64::from(part.bytes)).sum()
@@ -319,6 +334,7 @@ pub struct Catalog {
     pub objects: BTreeMap<String, ObjectGeneration>,
     pub repairs: BTreeMap<u64, RepairAttempt>,
     pub retired: Vec<RetiredFragment>,
+    pub completions: BTreeMap<u64, Completion>,
 }
 
 impl Catalog {

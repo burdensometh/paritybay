@@ -166,3 +166,107 @@ fn wrong_input_length_cannot_replace_current_generation() {
     assert_eq!(cluster.object("once").unwrap().generation, before);
     assert_eq!(get(&cluster, "once", RangeRequest::Full).0, b"original");
 }
+
+#[test]
+fn repeated_finish_returns_original_receipt_after_reopen_and_replacement() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    let prior = put(&cluster, "idempotent", b"old");
+    let mut expected = options(16);
+    expected.condition = Condition::Generation(prior);
+    let upload = cluster.begin_upload("idempotent", expected).unwrap();
+    cluster
+        .put_part(upload.id, 1, 8, &mut Cursor::new(b"01234567"))
+        .unwrap();
+    cluster
+        .put_part(upload.id, 2, 8, &mut Cursor::new(b"abcdefgh"))
+        .unwrap();
+
+    let first = cluster.complete_upload(upload.id).unwrap();
+    assert_eq!(first.generation, upload.id);
+    assert_eq!(first.replaced_generation, Some(prior));
+    assert_eq!(first.bytes, 16);
+    assert_eq!(first.stripes, 1);
+
+    // Simulate a lost finish response: reopen the cluster and ask again.
+    let reopened = Cluster::open(dir.root()).unwrap();
+    let again = reopened.complete_upload(upload.id).unwrap();
+    assert_eq!(again, first);
+
+    // A later overwrite must not change the receipt for the original upload.
+    let replacement = put(&reopened, "idempotent", b"new generation!");
+    assert_ne!(replacement, upload.id);
+    let third = reopened.complete_upload(upload.id).unwrap();
+    assert_eq!(third, first);
+    assert_eq!(
+        get(&reopened, "idempotent", RangeRequest::Full).0,
+        b"new generation!"
+    );
+
+    // Deleting the object leaves the recorded success intact.
+    reopened.delete("idempotent", Condition::Any).unwrap();
+    assert_eq!(reopened.complete_upload(upload.id).unwrap(), first);
+    // Aborting an already-published upload reports a conflict, not success.
+    assert!(matches!(
+        reopened.abort_upload(upload.id),
+        Err(Error::Conflict(_))
+    ));
+
+    // The receipt survives another reopen and round-trips through v1.
+    let reopened = Cluster::open(dir.root()).unwrap();
+    let bytes = fs::read(reopened.catalog_path()).unwrap();
+    let decoded = paritybay::manifest::v1::decode(&bytes).unwrap();
+    assert_eq!(
+        paritybay::manifest::v1::encode(&decoded).unwrap(),
+        bytes,
+        "catalog with completions must round-trip canonically"
+    );
+    assert_eq!(reopened.complete_upload(upload.id).unwrap(), first);
+}
+
+#[test]
+fn incomplete_or_condition_failed_finish_cannot_record_a_receipt() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+
+    // Condition failure after staging reserves, then a competing put wins.
+    let mut conditional = options(4);
+    conditional.condition = Condition::Absent;
+    let waiting = cluster.begin_upload("race", conditional).unwrap();
+    cluster
+        .put_part(waiting.id, 1, 4, &mut Cursor::new(b"mine"))
+        .unwrap();
+    let winner = put(&cluster, "race", b"wins");
+    assert!(matches!(
+        cluster.complete_upload(waiting.id),
+        Err(Error::Conflict(_))
+    ));
+    // No success receipt exists, so the upload is still pending and can be aborted.
+    assert!(cluster.catalog().unwrap().completions.is_empty());
+    cluster.abort_upload(waiting.id).unwrap();
+    assert!(matches!(
+        cluster.complete_upload(waiting.id),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(cluster.object("race").unwrap().generation, winner);
+}
+
+#[test]
+fn completion_receipt_survives_gc_and_exported_v1_catalog() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    let upload = cluster.begin_upload("retained", options(8)).unwrap();
+    cluster
+        .put_part(upload.id, 1, 8, &mut Cursor::new(b"ABCDEFGH"))
+        .unwrap();
+    let receipt = cluster.complete_upload(upload.id).unwrap();
+    assert_eq!(receipt.generation, upload.id);
+
+    cluster.collect().unwrap();
+    let reopened = Cluster::open(dir.root()).unwrap();
+    assert_eq!(reopened.complete_upload(upload.id).unwrap(), receipt);
+    assert_eq!(
+        reopened.catalog().unwrap().completions[&upload.id].generation,
+        upload.id
+    );
+}

@@ -42,7 +42,13 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   `replan ID` to replace the reservation before retrying. `abort ID`
   releases it. A successfully published upload uses its ID as its object
   generation, so `stat KEY` can resolve a lost finish response while that
-  generation is current.
+  generation is current. `finish ID` is idempotent: re-running it after the
+  publication is durable returns the original receipt, even if the response
+  was lost, the object was later replaced or deleted, or the condition no
+  longer holds. The durable receipt records the original generation, size,
+  condition and replaced generation. An upload that is incomplete, gapped,
+  CRC-damaged, unavailable or condition-failed never records a receipt and
+  cannot return a success.
 - **Get** pins an object generation and its receipt mapping. `--range
   START:END` is half-open, `START:` reads to EOF, and `:SIZE` reads a
   suffix of up to that size. Invalid endpoints are rejected. For each
@@ -97,7 +103,9 @@ fragments continue charging the owning node until cleanup.
 The cluster root owns `catalog.v1`, lock files, `nodes/ID/fragments` and
 `uploads/ID`. Node and upload file names carry the generation or session
 and a revision. The catalog records their contents and refuses malformed
-geometry or references. The executable accepts a dedicated directory
+geometry or references. A published multipart receipt is retained in the
+catalog by upload ID, so a repeated `finish` survives the loss of the
+original response. The executable accepts a dedicated directory
 under operator control. Simulated domains model availability of local
 directory nodes. They do not create physical failure isolation. The
 baseline models one unavailable fragment per stripe, and CRC32C detects

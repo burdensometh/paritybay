@@ -22,11 +22,19 @@ ordered by primary key in the canonical writer. The reader rejects
 duplicate keys, unknown tags, invalid layouts, out-of-bounds counts,
 truncation and trailing bytes. A complete frame is limited to 64 MiB.
 
+The trailing completion array records the receipt of a published multipart
+upload by upload ID. The canonical writer omits it entirely when the table is
+empty, so catalogs produced before completions existed (and catalogs with no
+published multipart uploads) keep their byte layout. A reader that finds
+trailing bytes must accept them as this array; an absent array is an empty
+table.
+
 ## Payload
 
 ```text
 catalog = block_bytes:u32 staging_limit:u64 next_id:u64
           array<node> array<upload> array<object> array<repair> array<retired>
+          [array<completion>]
 
 node = id:str domain:str media:u8 capacity:u64 state:u8
 
@@ -44,6 +52,9 @@ fragment = shard:u8 node:str revision:u64 bytes:u32 crc32c:u32
 repair = id:u64 key:str generation:u64 stripe:u32 from:fragment to:fragment
          kind:u8 state:u8 detail:str
 retired = node:str generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
+completion = upload:u64 key:str generation:u64 bytes:u64 stripes:u32
+             condition [replaced:u8 [generation:u64 for flag 1]]
+             weaker_stripes:u32
 ```
 
 | Field | Tags |

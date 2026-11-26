@@ -8,9 +8,9 @@ use crate::{Error, Result};
 
 use super::validate::{map_insert, MAX_NODES, MAX_PARTS, MAX_STRIPES};
 use super::{
-    validate_catalog, Catalog, Condition, DomainPolicy, FragmentAddress, FragmentReceipt, Media,
-    NodeDomain, NodeState, ObjectGeneration, PartReceipt, PlacementPlan, RepairAttempt, RepairKind,
-    RepairState, RetiredFragment, StripeManifest, UploadSession,
+    validate_catalog, Catalog, Completion, Condition, DomainPolicy, FragmentAddress,
+    FragmentReceipt, Media, NodeDomain, NodeState, ObjectGeneration, PartReceipt, PlacementPlan,
+    RepairAttempt, RepairKind, RepairState, RetiredFragment, StripeManifest, UploadSession,
 };
 
 pub const MAGIC: [u8; 8] = *b"PBAYV1\r\n";
@@ -43,6 +43,14 @@ pub fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
     out.count(catalog.retired.len())?;
     for entry in &catalog.retired {
         out.retired(entry)?;
+    }
+    // The completion table was added after v1 was published. Omit it when empty so
+    // catalogs without completions keep their exact canonical byte layout.
+    if !catalog.completions.is_empty() {
+        out.count(catalog.completions.len())?;
+        for entry in catalog.completions.values() {
+            out.completion(entry)?;
+        }
     }
     if out.0.len() > MAX_CATALOG_BYTES {
         return Err(Error::Capacity(format!(
@@ -105,6 +113,13 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
     for _ in 0..input.count(usize::MAX, 27)? {
         retired.push(input.retired()?);
     }
+    let mut completions = BTreeMap::new();
+    if !input.rest.is_empty() {
+        for _ in 0..input.count(usize::MAX, 36)? {
+            let entry = input.completion()?;
+            map_insert(&mut completions, entry.upload, entry, "completion")?;
+        }
+    }
     input.finish()?;
     let catalog = Catalog {
         block_bytes,
@@ -115,6 +130,7 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
         objects,
         repairs,
         retired,
+        completions,
     };
     validate_catalog(&catalog)?;
     Ok(catalog)
@@ -277,6 +293,28 @@ impl Encoder {
         self.u8(address.shard);
         self.u64(address.revision);
         self.u32(entry.bytes);
+        Ok(())
+    }
+
+    fn completion(&mut self, entry: &Completion) -> Result<()> {
+        let stripes = u32::try_from(entry.stripes)
+            .map_err(|_| Error::Capacity("v1 completion stripe count too large".into()))?;
+        let weaker_stripes = u32::try_from(entry.weaker_stripes)
+            .map_err(|_| Error::Capacity("v1 completion stripe count too large".into()))?;
+        self.u64(entry.upload);
+        self.string(&entry.key)?;
+        self.u64(entry.generation);
+        self.u64(entry.bytes);
+        self.u32(stripes);
+        self.condition(entry.condition);
+        match entry.replaced_generation {
+            None => self.u8(0),
+            Some(generation) => {
+                self.u8(1);
+                self.u64(generation);
+            }
+        }
+        self.u32(weaker_stripes);
         Ok(())
     }
 }
@@ -511,6 +549,31 @@ impl<'a> Decoder<'a> {
         Ok(RetiredFragment {
             address,
             bytes: self.u32()?,
+        })
+    }
+
+    fn completion(&mut self) -> Result<Completion> {
+        let upload = self.u64()?;
+        let key = self.string(512)?;
+        let generation = self.u64()?;
+        let bytes = self.u64()?;
+        let stripes = self.u32()? as usize;
+        let condition = self.condition()?;
+        let replaced_generation = match self.u8()? {
+            0 => None,
+            1 => Some(self.u64()?),
+            _ => return Err(self.error("unknown completion replacement flag")),
+        };
+        let weaker_stripes = self.u32()? as usize;
+        Ok(Completion {
+            upload,
+            key,
+            generation,
+            bytes,
+            stripes,
+            condition,
+            replaced_generation,
+            weaker_stripes,
         })
     }
 }

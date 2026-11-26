@@ -56,6 +56,7 @@ impl Cluster {
             objects: Default::default(),
             repairs: Default::default(),
             retired: Vec::new(),
+            completions: Default::default(),
         };
         self.commit_catalog(&catalog, "initialize")
     }

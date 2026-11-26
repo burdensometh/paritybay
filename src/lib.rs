@@ -16,7 +16,7 @@ pub use boundary::{Boundary, Checkpoint, FileGates, NoCheckpoints};
 pub use config::{parse_node, Config};
 pub use error::{Error, Result};
 pub use manifest::{
-    Catalog, Condition, DomainPolicy, FragmentReceipt, Media, NodeDomain, NodeState,
+    Catalog, Completion, Condition, DomainPolicy, FragmentReceipt, Media, NodeDomain, NodeState,
     ObjectGeneration, RepairAttempt, RepairKind, RepairState, StripeManifest, UploadSession,
 };
 

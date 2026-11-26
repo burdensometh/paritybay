@@ -276,8 +276,31 @@ fn validate_plan_mapping(catalog: &Catalog, attempt: &RepairAttempt) -> Result<(
     layout_valid(catalog, nodes, object.media, object.domain_policy)
 }
 
-fn validate_retired(catalog: &Catalog, referenced: &BTreeSet<FragmentAddress>) -> Result<()> {
-    let mut seen = BTreeSet::new();
+fn validate_completions(catalog: &Catalog) -> Result<()> {
+    for (upload, entry) in &catalog.completions {
+        checked_key(&entry.key).map_err(|e| corrupt(e.to_string()))?;
+        if *upload != entry.upload || entry.generation != *upload {
+            return Err(corrupt("completion upload and generation disagree"));
+        }
+        // IDs are monotonic and never reused, so the upload's own sequence is
+        // enough; it need not still name a live object, since the receipt
+        // outlives replacement or deletion of the generation it published.
+        existing_id(catalog, entry.upload, "completion upload")?;
+        shape(catalog, entry.bytes, entry.stripes)?;
+        if entry.condition == Condition::Generation(0)
+            || entry.replaced_generation.is_some_and(|id| id == entry.generation)
+            || entry.weaker_stripes > entry.stripes
+        {
+            return Err(corrupt("invalid completion receipt"));
+        }
+        if let Some(replaced) = entry.replaced_generation {
+            existing_id(catalog, replaced, "completion prior generation")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_retired(catalog: &Catalog, referenced: &BTreeSet<FragmentAddress>) -> Result<()> {    let mut seen = BTreeSet::new();
     for entry in &catalog.retired {
         let address = &entry.address;
         existing_id(catalog, address.generation, "retired generation")?;
@@ -358,6 +381,7 @@ pub(crate) fn validate_catalog(catalog: &Catalog) -> Result<()> {
             ));
         }
     }
+    validate_completions(catalog)?;
     validate_retired(catalog, &referenced)?;
 
     let ledger = crate::placement::Ledger::from_catalog(catalog, None)?;

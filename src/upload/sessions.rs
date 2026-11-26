@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use crate::manifest::{check_condition, checked_key, sequence};
+use crate::manifest::{check_condition, checked_key, sequence, Completion};
 use crate::placement::{DomainHealth, PlacementPlanner};
 use crate::{
     Catalog, Cluster, Condition, DomainPolicy, Error, Media, ObjectGeneration, Result,
@@ -24,6 +24,20 @@ pub struct WriteReceipt {
     pub condition: Condition,
     pub replaced_generation: Option<u64>,
     pub weaker_stripes: usize,
+}
+
+impl From<&Completion> for WriteReceipt {
+    fn from(entry: &Completion) -> Self {
+        Self {
+            key: entry.key.clone(),
+            generation: entry.generation,
+            bytes: entry.bytes,
+            stripes: entry.stripes,
+            condition: entry.condition,
+            replaced_generation: entry.replaced_generation,
+            weaker_stripes: entry.weaker_stripes,
+        }
+    }
 }
 
 impl Cluster {
@@ -88,6 +102,14 @@ impl Cluster {
 
     pub fn abort_upload(&self, id: u64) -> Result<()> {
         let mut txn = self.transaction()?;
+        if let Some(entry) = txn.catalog.completions.get(&id) {
+            // Already published; there is no reservation left to release and the
+            // durable receipt must survive.
+            return Err(Error::Conflict(format!(
+                "upload {id} already published generation {}",
+                entry.generation
+            )));
+        }
         if txn.catalog.uploads.remove(&id).is_none() {
             return Err(missing_upload(id));
         }
@@ -119,6 +141,12 @@ impl Cluster {
 
     pub fn complete_upload(&self, id: u64) -> Result<WriteReceipt> {
         let mut txn = self.transaction()?;
+        // The receipt is published in the same atomic catalog replacement as the
+        // object. A repeated finish therefore resolves to the original success
+        // even after the finish response was lost or the object later changed.
+        if let Some(entry) = txn.catalog.completions.get(&id) {
+            return Ok(WriteReceipt::from(entry));
+        }
         let upload = txn
             .catalog
             .uploads
@@ -172,6 +200,19 @@ impl Cluster {
         )?;
         txn.catalog.uploads.remove(&id);
         let receipt = publish(&mut txn.catalog, object, options.condition);
+        txn.catalog.completions.insert(
+            id,
+            Completion {
+                upload: id,
+                key: receipt.key.clone(),
+                generation: receipt.generation,
+                bytes: receipt.bytes,
+                stripes: receipt.stripes,
+                condition: receipt.condition,
+                replaced_generation: receipt.replaced_generation,
+                weaker_stripes: receipt.weaker_stripes,
+            },
+        );
         txn.commit("upload-complete")?;
         Ok(receipt)
     }
