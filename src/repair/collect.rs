@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::files;
 use crate::manifest::FragmentAddress;
-use crate::{Catalog, Cluster, Error, NodeState, RepairState, Result};
+use crate::{Catalog, Cluster, Error, RepairState, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectionReport {
@@ -43,12 +43,11 @@ impl Cluster {
         report.retired_entries = txn.catalog.retired.len();
         txn.catalog.retired.clear();
 
-        for node in txn
-            .catalog
-            .nodes
-            .values()
-            .filter(|node| node.state != NodeState::Removed)
-        {
+        // Removal only tombstones the catalog entry; the node directory stays behind.
+        // It can still hold unreferenced fragments (for example from a publication that
+        // failed before its catalog commit), so removed nodes must be swept too.
+        // Files named by a live receipt or a planned repair stay in `active`.
+        for node in txn.catalog.nodes.values() {
             self.collect_node(&node.id, &active, &mut report)?;
         }
         self.collect_staging(&txn.catalog, &mut report)?;

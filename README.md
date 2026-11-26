@@ -65,6 +65,9 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   `nodes` to inspect live, reserved and retired allocations. `node-media`
   changes the class of a drained, unreferenced node. Node removal marks the
   catalog entry and leaves the node directory available for inspection.
+  `gc` still sweeps a removed node directory, so orphans left by an
+  earlier failed publication are reclaimed whether collection ran before
+  or after removal.
 
 `paritybay help` lists all commands. Exit codes 2–7 distinguish invalid
 input, missing entries, conflicts or pending repairs, unavailable capacity,
