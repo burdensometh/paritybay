@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod codec;
+mod eligibility;
 pub mod manifest;
 pub mod placement;
 pub mod readpath;

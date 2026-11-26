@@ -80,6 +80,24 @@ for a key, stripe index and shard index. Each stripe search checks the
 current per-node budgets, including earlier placements in the same plan.
 Planning carries prior stripes forward in order.
 
+The media and domain rules live in one place (`src/eligibility.rs`) and
+serve first placement, repair planning, repair publication and catalog
+validation identically; only the node-state requirement changes by stage:
+
+- **New target** — initial placement, stored upload placement plans and
+  repair destinations must be `online`, match the media class and satisfy
+  the domain policy. Draining, offline and removed nodes can never become a
+  new target. Publication re-checks this against current state, so a target
+  that drains after planning is refused (the repair ends `stale`) and the
+  original mapping is preserved.
+- **Recorded mapping** — current object fragments, historical v1 samples and
+  planned repairs already on disk stay valid while their nodes drain or sit
+  offline; only a removed node invalidates a recorded location.
+- **Read** — the most permissive stage: online and draining nodes keep
+  serving fragments during evacuation, while offline and removed nodes
+  report an unavailable-node fault.
+
+
 The v1 implementation supports up to 64 node IDs, including removal
 tombstones. An object can contain up to 512 MiB and 65,536 stripes. One
 multipart part can contain up to 64 MiB. The active staging reservation

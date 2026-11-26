@@ -7,7 +7,7 @@ use crate::{
     Catalog, DomainPolicy, Error, Media, NodeDomain, ObjectGeneration, Result, StripeManifest,
 };
 
-use super::Ledger;
+use super::{can_target, domain_count, Ledger};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DomainHealth {
@@ -154,12 +154,6 @@ fn first_layout<'a>(
     None
 }
 
-fn domain_count(nodes: [&NodeDomain; SHARDS]) -> usize {
-    let [a, b, c] = nodes;
-    1 + usize::from(b.domain != a.domain)
-        + usize::from(c.domain != a.domain && c.domain != b.domain)
-}
-
 fn ranked<'a>(
     catalog: &'a Catalog,
     ledger: &Ledger,
@@ -173,8 +167,9 @@ fn ranked<'a>(
         .nodes
         .values()
         .filter(|node| {
-            node.state.can_place()
-                && node.media == media
+            // New placements may only land on currently eligible targets:
+            // online nodes of the requested media class.
+            can_target(catalog, &node.id, media)
                 && node.capacity.saturating_sub(ledger.allocated(&node.id)) >= u64::from(bytes)
         })
         .map(|node| (Reverse(rank(key, stripe, shard, &node.id)), node))
@@ -285,7 +280,8 @@ fn replacement_score(
     candidate: &NodeDomain,
     mode: ReplacementPolicy,
 ) -> Option<usize> {
-    if !candidate.state.can_place() || candidate.media != object.media {
+    // Repair destinations obey the same target eligibility as first placement.
+    if !can_target(catalog, &candidate.id, object.media) {
         return None;
     }
     let index = usize::from(shard);

@@ -179,7 +179,7 @@ fn read_shard(
         kind,
         detail,
     };
-    if !catalog.nodes[&receipt.node].state.can_read() {
+    if !crate::eligibility::can_read_from(catalog, &receipt.node) {
         let state = catalog.nodes[&receipt.node].state;
         return Err(fault(
             FaultKind::NodeUnavailable,

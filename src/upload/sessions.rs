@@ -145,13 +145,19 @@ impl Cluster {
             }
         }
         for plan in &upload.placements {
-            for node in &plan.nodes {
-                if !txn.catalog.nodes[node].state.can_place() {
-                    return Err(Error::Conflict(format!(
-                        "upload {id} needs replan; node {node} is unavailable"
-                    )));
-                }
-            }
+            // Re-check against current eligibility at publication: a node may
+            // have drained or changed media after the session was planned.
+            crate::eligibility::check_target_stripe(
+                &txn.catalog,
+                plan.nodes.each_ref().map(String::as_str),
+                upload.media,
+                upload.domain_policy,
+            )
+            .map_err(|_| {
+                Error::Conflict(format!(
+                    "upload {id} needs replan; its placements are no longer eligible targets"
+                ))
+            })?;
         }
 
         let mut stream = self.part_stream(&upload);

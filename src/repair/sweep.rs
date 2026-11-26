@@ -4,7 +4,8 @@ use crate::manifest::checked_key;
 use crate::placement::ReplacementPolicy;
 use crate::readpath::{StripeInspection, StripeVerdict};
 use crate::{
-    Catalog, Cluster, Error, ObjectGeneration, RepairAttempt, RepairKind, RepairState, Result,
+    Catalog, Cluster, Error, Media, ObjectGeneration, RepairAttempt, RepairKind, RepairState,
+    Result,
 };
 
 use super::{CollectionReport, Planning};
@@ -174,7 +175,7 @@ impl Cluster {
                 return Ok(());
             }
 
-            let choices = choices(catalog, &inspected, kind);
+            let choices = choices(catalog, &inspected, object.media, kind);
             let mut no_target = None;
             let mut advanced = false;
             for (shard, policy) in choices {
@@ -252,6 +253,7 @@ fn selected<'a>(catalog: &'a Catalog, key: Option<&str>) -> Result<Vec<&'a Objec
 fn choices(
     catalog: &Catalog,
     inspection: &StripeInspection,
+    media: Media,
     kind: RepairKind,
 ) -> Vec<(u8, ReplacementPolicy)> {
     let faults = &inspection.faults;
@@ -265,7 +267,9 @@ fn choices(
         .manifest
         .fragments
         .iter()
-        .filter(|receipt| !catalog.nodes[&receipt.node].state.can_place())
+        // A recorded fragment whose node has lost target eligibility (it is
+        // draining, offline or removed, or its media changed) must be moved.
+        .filter(|receipt| !crate::eligibility::can_target(catalog, &receipt.node, media))
         .map(|receipt| (receipt.shard, ReplacementPolicy::Evacuate))
         .collect();
     if !evacuations.is_empty() {

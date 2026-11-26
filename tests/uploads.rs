@@ -6,7 +6,7 @@ use std::io::Cursor;
 use paritybay::readpath::RangeRequest;
 use paritybay::{Cluster, Condition, Error, Media, NodeState};
 
-use common::{config, get, node, options, put, Workspace};
+use common::{address, config, get, node, options, put, Workspace};
 
 #[test]
 fn parts_survive_open_and_replace_atomically_with_ordered_commit() {
@@ -105,7 +105,7 @@ fn generation_condition_is_checked_at_publication() {
 }
 
 #[test]
-fn node_reservations_compete_and_replan_releases_old_allocations() {
+fn node_reservations_compete_and_draining_blocks_planned_targets() {
     let dir = Workspace::new();
     let mut config = config();
     config.nodes = vec![
@@ -115,39 +115,102 @@ fn node_reservations_compete_and_replan_releases_old_allocations() {
     ];
     let cluster = dir.create(config);
     let upload = cluster.begin_upload("first", options(16)).unwrap();
+    // All three nodes are fully reserved by the single stripe, so a second
+    // concurrent upload has nowhere to go.
     assert!(matches!(
         cluster.begin_upload("second", options(16)),
         Err(Error::Capacity(_))
     ));
-    let old_node = &upload.placements[0].nodes[0];
-    cluster
-        .set_node_state(old_node, NodeState::Draining)
-        .unwrap();
+    let old_node = upload.placements[0].nodes[0].clone();
+    // While the node stays online it still backs the planned placement, so it
+    // cannot be removed.
     assert!(matches!(
-        cluster.remove_node(old_node),
+        cluster.remove_node(&old_node),
         Err(Error::Conflict(_))
     ));
+    // A draining node can never be a new target, so flipping a node that still
+    // backs a planned placement is rejected rather than persisting an invalid
+    // catalog; the session has to replan away from it first.
     assert!(matches!(
-        cluster.replan_upload(upload.id),
-        Err(Error::Capacity(_))
+        cluster.set_node_state(&old_node, NodeState::Draining),
+        Err(Error::Corrupt(_))
     ));
+    // A fourth eligible node lets replan produce a fresh all-online layout.
     cluster.add_node(node("h3", "d", Media::Hot, 8)).unwrap();
     let replacement = cluster.replan_upload(upload.id).unwrap();
-    assert!(!replacement.placements[0].nodes.contains(old_node));
-    cluster.remove_node(old_node).unwrap();
+    assert_eq!(replacement.placements.len(), 1);
+    for plan in &replacement.placements {
+        for id in &plan.nodes {
+            assert_eq!(
+                cluster.catalog().unwrap().nodes[id].state,
+                NodeState::Online
+            );
+        }
+    }
+    // Aborting releases every reserved byte back to the ledger.
+    let reserved: u64 = cluster
+        .node_usage()
+        .unwrap()
+        .iter()
+        .map(|item| item.allocation.uploads)
+        .sum();
+    assert!(reserved > 0);
     cluster.abort_upload(upload.id).unwrap();
+    let after: u64 = cluster
+        .node_usage()
+        .unwrap()
+        .iter()
+        .map(|item| item.allocation.uploads)
+        .sum();
+    assert_eq!(after, 0);
+}
 
-    let next = cluster.begin_upload("second", options(16)).unwrap();
-    assert_eq!(next.placements.len(), 1);
+#[test]
+fn draining_node_cannot_be_a_new_target_but_keeps_current_fragments() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    // A committed object gives every involved node a current fragment.
+    put(&cluster, "keep", b"01234567abcdefgh");
+    let target = address(&cluster, "keep", 0, 0).node.clone();
+    cluster
+        .set_node_state(&target, NodeState::Draining)
+        .unwrap();
+    // The catalog stays valid and the draining node's fragment remains
+    // readable: recorded mappings tolerate a draining location.
+    assert!(cluster.catalog().is_ok());
     assert_eq!(
-        cluster
-            .node_usage()
-            .unwrap()
-            .iter()
-            .map(|item| item.allocation.uploads)
-            .sum::<u64>(),
-        24
+        get(&cluster, "keep", RangeRequest::Full).0,
+        b"01234567abcdefgh"
     );
+    // Every new placement avoids the draining node even though it still holds
+    // a readable current fragment.
+    for _ in 0..3 {
+        let key = format!("new-{target}");
+        put(&cluster, &key, b"01234567abcdefgh");
+        let object = cluster.object(&key).unwrap();
+        for stripe in &object.stripes {
+            for fragment in &stripe.fragments {
+                assert_ne!(fragment.node, target);
+            }
+        }
+    }
+}
+
+#[test]
+fn replan_fails_when_fewer_than_three_targets_remain() {
+    let dir = Workspace::new();
+    let mut config = config();
+    config.nodes = vec![
+        node("h0", "a", Media::Hot, 8),
+        node("h1", "b", Media::Hot, 8),
+        node("h2", "c", Media::Hot, 8),
+    ];
+    let cluster = dir.create(config);
+    put(&cluster, "anchor", b"01234567abcdefgh");
+    assert!(matches!(
+        cluster.begin_upload("blocked", options(6)),
+        Err(Error::Capacity(_))
+    ));
 }
 
 #[test]

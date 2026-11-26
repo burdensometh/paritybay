@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::codec::stripe_lengths;
 use crate::config::{check_limits, validate_node};
+use crate::eligibility::{check_existing_stripe, check_target_stripe};
 use crate::{Error, Result};
 
 use super::{
-    Catalog, Condition, DomainPolicy, FragmentAddress, FragmentReceipt, Media, NodeState,
-    ObjectGeneration, RepairAttempt, RepairState, UploadSession,
+    Catalog, Condition, FragmentAddress, FragmentReceipt, NodeState, ObjectGeneration,
+    RepairAttempt, RepairState, UploadSession,
 };
 
 pub(crate) const MAX_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
@@ -93,33 +94,6 @@ fn existing_id(catalog: &Catalog, id: u64, field: &str) -> Result<()> {
     Ok(())
 }
 
-fn matching_node(catalog: &Catalog, id: &str, media: Media) -> Result<()> {
-    match catalog.nodes.get(id) {
-        Some(node) if node.media == media && node.state != NodeState::Removed => Ok(()),
-        _ => Err(corrupt(format!("invalid {media} node reference {id}"))),
-    }
-}
-
-fn layout_valid(
-    catalog: &Catalog,
-    nodes: [&str; 3],
-    media: Media,
-    policy: DomainPolicy,
-) -> Result<()> {
-    let mut domains = BTreeSet::new();
-    for id in nodes {
-        matching_node(catalog, id, media)?;
-        domains.insert(catalog.nodes[id].domain.as_str());
-    }
-    if nodes[0] == nodes[1] || nodes[0] == nodes[2] || nodes[1] == nodes[2] {
-        return Err(corrupt("stripe uses a node twice"));
-    }
-    if policy == DomainPolicy::Strict && domains.len() != 3 {
-        return Err(corrupt("strict stripe repeats a domain"));
-    }
-    Ok(())
-}
-
 fn shape(catalog: &Catalog, size: u64, stripes: usize) -> Result<()> {
     let expected =
         expected_stripe_count(size, catalog.block_bytes).map_err(|e| corrupt(e.to_string()))?;
@@ -159,7 +133,9 @@ fn validate_object(catalog: &Catalog, object: &ObjectGeneration) -> Result<()> {
             .fragments
             .each_ref()
             .map(|fragment| fragment.node.as_str());
-        layout_valid(catalog, nodes, object.media, object.domain_policy)?;
+        // Existing mappings stay legal while their nodes drain or sit offline;
+        // only removal invalidates a recorded fragment location.
+        check_existing_stripe(catalog, nodes, object.media, object.domain_policy)?;
         offset = stripe.end();
     }
     if offset != object.size {
@@ -194,7 +170,9 @@ fn validate_upload(catalog: &Catalog, upload: &UploadSession) -> Result<()> {
     }
     for plan in &upload.placements {
         let nodes = plan.nodes.each_ref().map(String::as_str);
-        layout_valid(catalog, nodes, upload.media, upload.domain_policy)?;
+        // Stored placement plans are pending new destinations: every named node
+        // must still be an eligible (online, matching-media) target.
+        check_target_stripe(catalog, nodes, upload.media, upload.domain_policy)?;
     }
     Ok(())
 }
@@ -245,8 +223,18 @@ fn validate_repairs(catalog: &Catalog, referenced: &mut BTreeSet<FragmentAddress
 }
 
 fn validate_plan_mapping(catalog: &Catalog, attempt: &RepairAttempt) -> Result<()> {
+    // Catalog validation is deliberately lenient about node *state* for a
+    // planned repair: both the source and the destination are recorded
+    // mappings that only have to avoid removed nodes. A target that drains
+    // after planning must remain persistable so the plan survives until
+    // publication, where the current target eligibility is re-checked and the
+    // attempt is marked stale instead of publishing. Media, uniqueness and the
+    // domain policy still use the shared rules.
     for node in [&attempt.from.node, &attempt.to.node] {
-        if catalog.nodes[node].state == NodeState::Removed {
+        let Some(entry) = catalog.nodes.get(node) else {
+            return Err(corrupt("planned repair references unknown node"));
+        };
+        if entry.state == NodeState::Removed {
             return Err(corrupt("planned repair references removed node"));
         }
     }
@@ -273,7 +261,9 @@ fn validate_plan_mapping(catalog: &Catalog, attempt: &RepairAttempt) -> Result<(
         .each_ref()
         .map(|fragment| fragment.node.as_str());
     nodes[index] = &attempt.to.node;
-    layout_valid(catalog, nodes, object.media, object.domain_policy)
+    // Evaluate the post-repair layout with recorded-mapping tolerance for
+    // state while keeping the shared media, uniqueness and domain rules.
+    check_existing_stripe(catalog, nodes, object.media, object.domain_policy)
 }
 
 fn validate_retired(catalog: &Catalog, referenced: &BTreeSet<FragmentAddress>) -> Result<()> {

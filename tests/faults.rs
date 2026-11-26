@@ -246,3 +246,141 @@ fn removal_rechecks_state_after_controlled_pause() {
     assert!(matches!(running.join().unwrap(), Err(Error::Conflict(_))));
     assert_eq!(cluster.catalog().unwrap().nodes["hot-e"].media, Media::Hot);
 }
+
+#[test]
+fn repair_publication_rejects_target_that_drained_after_planning() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    put(&cluster, "movable", b"01234567abcdefgh");
+    // Take the source node offline: its recorded mapping stays legal and
+    // readable-as-fault, but it can no longer be a placement target, so the
+    // heal repair must relocate the shard onto a different online node.
+    let original = address(&cluster, "movable", 0, 0);
+    cluster
+        .set_node_state(&original.node, NodeState::Offline)
+        .unwrap();
+    assert_eq!(
+        cluster.inspect("movable").unwrap().stripes[0].faults[0].kind,
+        FaultKind::NodeUnavailable
+    );
+
+    // Plan the repair, then pause before the copy so the chosen target can be
+    // forced into draining while the plan is still pending.
+    let (worker, reached, resume) = pause(&cluster, Boundary::BeforeRepairCopy);
+    let running = thread::spawn(move || worker.heal(Some("movable")).unwrap());
+    reached.recv_timeout(WAIT).unwrap();
+
+    let planned = cluster
+        .catalog()
+        .unwrap()
+        .repairs
+        .values()
+        .find(|attempt| attempt.state == RepairState::Planned)
+        .unwrap()
+        .clone();
+    let target = planned.to.node.clone();
+    assert_ne!(target, original.node);
+    assert_eq!(
+        cluster.catalog().unwrap().nodes[&target].state,
+        NodeState::Online
+    );
+
+    // The target drains after the plan was made; current target eligibility no
+    // longer holds because draining nodes can never receive a new fragment.
+    cluster
+        .set_node_state(&target, NodeState::Draining)
+        .unwrap();
+    resume.send(()).unwrap();
+
+    let report = running.join().unwrap();
+    let event = &report.events[0];
+    assert_eq!(event.outcome, MaintenanceOutcome::Changed);
+    let attempt = cluster.repair_attempt(event.attempt.unwrap()).unwrap();
+    assert_eq!(attempt.state, RepairState::Stale);
+
+    // The original mapping is preserved: the stale plan never published.
+    assert_eq!(
+        address(&cluster, "movable", 0, 0),
+        original,
+        "the from-receipt must stay the current mapping after rejection"
+    );
+    // The catalog remains valid and the draining target keeps no new fragment.
+    assert!(cluster.catalog().is_ok());
+    assert_eq!(
+        cluster.catalog().unwrap().nodes[&target].state,
+        NodeState::Draining
+    );
+}
+
+#[test]
+fn replayed_repair_after_reopen_rejects_draining_target_and_keeps_mapping() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    put(&cluster, "durable", b"01234567abcdefgh");
+    let original = address(&cluster, "durable", 0, 0);
+    cluster
+        .set_node_state(&original.node, NodeState::Offline)
+        .unwrap();
+
+    // Plan and copy succeed, but the catalog publication commit fails, leaving
+    // a durable Planned attempt on disk with its fragment already written.
+    let interrupted = cluster
+        .clone()
+        .with_checkpoints(FailAt(Boundary::BeforeCatalogCommit, "repair-publish"));
+    assert!(matches!(
+        interrupted.heal(Some("durable")),
+        Err(Error::Conflict(_))
+    ));
+
+    // While the attempt sits Planned, its chosen target drains. Catalog
+    // validation must still accept this historically planned mapping.
+    let reopened = Cluster::open(dir.root()).unwrap();
+    let attempt = reopened
+        .catalog()
+        .unwrap()
+        .repairs
+        .values()
+        .find(|entry| entry.state == RepairState::Planned)
+        .unwrap()
+        .clone();
+    let target = attempt.to.node.clone();
+    assert_ne!(target, original.node);
+    reopened
+        .set_node_state(&target, NodeState::Draining)
+        .unwrap();
+
+    // Reopen again to prove the draining-target planned catalog is loadable,
+    // then replay: current target eligibility now fails so publication is
+    // refused and the original mapping survives.
+    let reopened = Cluster::open(dir.root()).unwrap();
+    let replayed = reopened.run_repair(attempt.id).unwrap();
+    assert_eq!(replayed.state, RepairState::Stale);
+    assert_eq!(address(&reopened, "durable", 0, 0), original);
+    assert_eq!(
+        reopened.catalog().unwrap().nodes[&target].state,
+        NodeState::Draining
+    );
+}
+
+#[test]
+fn catalog_with_fragments_on_draining_node_stays_openable() {
+    let dir = Workspace::new();
+    let cluster = dir.create(config());
+    put(&cluster, "history", b"01234567abcdefgh");
+    let draining_node = address(&cluster, "history", 0, 0).node.clone();
+    cluster
+        .set_node_state(&draining_node, NodeState::Draining)
+        .unwrap();
+
+    // Reopening runs the full shared validation path, which must accept the
+    // historically legal recorded mapping even though the node is draining.
+    let reopened = Cluster::open(dir.root()).unwrap();
+    assert_eq!(
+        reopened.catalog().unwrap().nodes[&draining_node].state,
+        NodeState::Draining
+    );
+    assert_eq!(
+        get(&reopened, "history", RangeRequest::Full).0,
+        b"01234567abcdefgh"
+    );
+}
