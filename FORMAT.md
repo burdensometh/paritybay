@@ -1,16 +1,19 @@
-# ParityBay v1 on disk
+# ParityBay on disk
 
 A cluster root contains a single current catalog and the fragment/staging
 files named by it. Paths in receipts are relative to the root. The catalog
-is always written in v1 and is read by the same loader at initialization,
-open, query and transaction time. `v1-check` and `v1-export` inspect or
-copy this format.
+is either `catalog.v1` (original strings) or `catalog.v2` (compact node
+references). When both exist, the complete `catalog.v2` is authoritative.
+The same loader reads whichever is present at initialization, open, query
+and transaction time, and commits preserve the current format. `v1-check`
+and `v1-export` inspect or copy the v1 format, `v2-check` verifies a v2
+catalog, and `v2-migrate` switches a cluster to v2.
 
 ## Frame
 
 | Field | Encoding |
 |---|---|
-| Magic | 8 bytes, ASCII `PBAYV1` followed by CR LF |
+| Magic | 8 bytes, ASCII `PBAYV1` or `PBAYV2` followed by CR LF |
 | Payload length | `u32` |
 | Payload CRC32C | `u32`, Castagnoli checksum of the payload |
 | Payload | Exactly the declared number of bytes |
@@ -22,7 +25,7 @@ ordered by primary key in the canonical writer. The reader rejects
 duplicate keys, unknown tags, invalid layouts, out-of-bounds counts,
 truncation and trailing bytes. A complete frame is limited to 64 MiB.
 
-## Payload
+## Payload (v1)
 
 ```text
 catalog = block_bytes:u32 staging_limit:u64 next_id:u64
@@ -54,6 +57,41 @@ retired = node:str generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
 | Write condition | 0 any, 1 absent, 2 exact generation |
 | Repair kind | 0 heal, 1 rebalance |
 | Repair state | 0 planned, 1 published, 2 stale, 3 unrecoverable |
+
+## Payload (v2)
+
+The v2 frame is identical except for the `PBAYV2` magic. The payload has
+the same sections in the same order, and the node table is encoded
+unchanged. The row order of that table defines a zero-based index, and
+every node string outside the table becomes a `ref`:
+
+```text
+ref = u16
+
+placement = node0:ref node1:ref node2:ref
+fragment = shard:u8 node:ref revision:u64 bytes:u32 crc32c:u32
+retired = node:ref generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
+```
+
+All other fields keep the v1 encoding, so uploads, objects, repairs and
+retired entries differ only in their node references. Each node id
+occupies exactly one table row, keyed by its full id: nodes that share a
+failure domain stay distinct rows, and every old reference maps back to
+the same node after migration. The reader rejects a `ref` beyond the node
+table.
+
+## Migration
+
+`v2-migrate` holds the catalog lock, encodes the current catalog as v2,
+writes and syncs a draft, and atomically renames it to `catalog.v2`; the
+rename is the switch. It then removes the superseded `catalog.v1`. If the
+process stops before the rename, `catalog.v1` remains the complete current
+catalog and the cluster keeps reading, writing and repairing in v1. If it
+stops after the rename, `catalog.v2` is authoritative and a repeated
+`v2-migrate` finishes the cleanup. Migration rewrites only the catalog;
+fragment, staging and node files are untouched.
+
+## Fragments and stripes
 
 A fragment consists of raw bytes in
 `nodes/NODE/fragments/GGGGGGGGGGGGGGGG-SSSSSSSS-H-RRRRRRRRRRRRRRRR.pb`.

@@ -100,4 +100,25 @@ pb node-state z-spare online
 : > "$gate.resume"
 expect_conflict "$child"
 pb nodes | grep '^node=z-spare .*state=online'
+
+printf '\n== Interrupt catalog migration before commit ==\n'
+rm -f -- "$gates/before-catalog-commit".*
+arm before-catalog-commit
+gated v2-migrate &
+child=$!
+gate=$(await_gate before-catalog-commit)
+cat "$gate.ready"
+: > "$gate.fail"
+expect_conflict "$child"
+test -f "$root/catalog.v1"
+test ! -e "$root/catalog.v2"
+pb get race "$work/read"
+cmp "$work/second" "$work/read"
+pb v2-migrate | grep '^v2=true migrated=true'
+test -f "$root/catalog.v2"
+test ! -e "$root/catalog.v1"
+pb get race "$work/migrated"
+cmp "$work/second" "$work/migrated"
+pb heal race
+pb scan
 printf 'fault_boundaries=passed\n'

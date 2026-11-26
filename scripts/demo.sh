@@ -63,4 +63,16 @@ printf '\n== Durable v1 catalog ==\n'
 pb v1-export "$work/exported.v1"
 pb v1-check "$work/exported.v1"
 cmp "$root/catalog.v1" "$work/exported.v1"
+
+printf '\n== Migrate to the compact v2 catalog ==\n'
+pb v2-migrate
+test -f "$root/catalog.v2"
+test ! -e "$root/catalog.v1"
+pb v2-check "$root/catalog.v2"
+pb get example "$work/migrated" --report
+cmp "$work/original" "$work/migrated"
+pb put after-migration "$work/original" --if absent
+pb get after-migration "$work/after"
+cmp "$work/original" "$work/after"
+pb scan
 printf 'demo=passed\n'

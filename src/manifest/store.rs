@@ -2,13 +2,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use crate::files::{self, DraftFile, LockMode};
-use crate::{Boundary, Cluster, Config, Error, Result};
+use crate::{Boundary, Cluster, Config, Error, MigrationReport, Result};
 
 use super::{
-    check_condition, checked_key, v1, Catalog, Condition, FragmentAddress, ObjectGeneration,
+    check_condition, checked_key, v1, v2, Catalog, Condition, FragmentAddress, ObjectGeneration,
 };
 
-const CATALOG: &str = "catalog.v1";
+const CATALOG_V1: &str = "catalog.v1";
+const CATALOG_V2: &str = "catalog.v2";
 const CATALOG_LOCK: &str = "catalog.lock";
 const READER_LOCK: &str = "readers.lock";
 
@@ -109,10 +110,18 @@ impl Cluster {
     }
 
     fn load_catalog(&self) -> Result<Catalog> {
-        let path = self.catalog_path();
-        let bytes = files::read_limited(&path, v1::MAX_CATALOG_BYTES).map_err(|error| {
+        // A migrated cluster may still carry its superseded v1 snapshot; the
+        // complete v2 catalog is always authoritative.
+        let v2_path = self.root.join(CATALOG_V2);
+        match files::read_limited(&v2_path, v2::MAX_CATALOG_BYTES) {
+            Ok(bytes) => return v2::decode(&bytes),
+            Err(error) if error.is_not_found_io() => {}
+            Err(error) => return Err(error),
+        }
+        let v1_path = self.root.join(CATALOG_V1);
+        let bytes = files::read_limited(&v1_path, v1::MAX_CATALOG_BYTES).map_err(|error| {
             if error.is_not_found_io() {
-                Error::NotFound(format!("v1 catalog {}", path.display()))
+                Error::NotFound(format!("catalog in {}", self.root.display()))
             } else {
                 error
             }
@@ -121,8 +130,14 @@ impl Cluster {
     }
 
     fn commit_catalog(&self, catalog: &Catalog, action: &str) -> Result<()> {
-        let bytes = v1::encode(catalog)?;
-        let path = self.catalog_path();
+        // Commits preserve the catalog's current format; v2-migrate performs
+        // the only format switch.
+        let (path, compact) = self.catalog_location();
+        let bytes = if compact {
+            v2::encode(catalog)?
+        } else {
+            v1::encode(catalog)?
+        };
         let mut draft = DraftFile::create(&path)?;
         draft.write(&bytes)?;
         draft.sync(self, "catalog")?;
@@ -130,8 +145,50 @@ impl Cluster {
         draft.publish(&path)
     }
 
+    /// Switches the cluster catalog to the compact v2 format. The v2 file
+    /// appears by atomic rename, so an interruption leaves the last complete
+    /// catalog in place; a repeated call finishes the cleanup.
+    pub fn migrate_v2(&self) -> Result<MigrationReport> {
+        let txn = self.transaction()?;
+        let v1_path = self.root.join(CATALOG_V1);
+        let v2_path = self.root.join(CATALOG_V2);
+        let switched = if v2_path.is_file() {
+            false
+        } else {
+            let bytes = v2::encode(&txn.catalog)?;
+            let mut draft = DraftFile::create(&v2_path)?;
+            draft.write(&bytes)?;
+            draft.sync(self, "catalog-migrate")?;
+            self.checkpoint(Boundary::BeforeCatalogCommit, "catalog-migrate")?;
+            draft.publish(&v2_path)?;
+            true
+        };
+        // The rename already switched the cluster; dropping the superseded
+        // v1 snapshot is cleanup that also completes an interrupted switch.
+        if files::remove_file(&v1_path)? {
+            files::sync_dir(&self.root)?;
+        }
+        Ok(MigrationReport {
+            switched,
+            objects: txn.catalog.objects.len(),
+            uploads: txn.catalog.uploads.len(),
+            nodes: txn.catalog.nodes.len(),
+            repairs: txn.catalog.repairs.len(),
+            retired: txn.catalog.retired.len(),
+        })
+    }
+
+    fn catalog_location(&self) -> (PathBuf, bool) {
+        let v2_path = self.root.join(CATALOG_V2);
+        if v2_path.is_file() {
+            (v2_path, true)
+        } else {
+            (self.root.join(CATALOG_V1), false)
+        }
+    }
+
     pub fn catalog_path(&self) -> PathBuf {
-        self.root.join(CATALOG)
+        self.catalog_location().0
     }
 
     pub fn export_catalog(&self, path: impl AsRef<Path>) -> Result<()> {

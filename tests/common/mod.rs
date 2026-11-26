@@ -47,6 +47,19 @@ pub fn config() -> Config {
     Config::parse(include_str!("../../config/cluster.conf")).unwrap()
 }
 
+pub fn copy_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
 pub fn node(id: &str, domain: &str, media: Media, capacity: u64) -> NodeDomain {
     NodeDomain {
         id: id.into(),

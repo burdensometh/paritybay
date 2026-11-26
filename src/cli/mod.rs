@@ -12,7 +12,7 @@ use paritybay::{Cluster, Config, Error, FileGates, Result};
 
 use self::arguments::Arguments;
 
-const HELP: &str = "ParityBay v1
+const HELP: &str = "ParityBay
 Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
 
   init CONFIG
@@ -30,6 +30,7 @@ Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
   repair-log [ATTEMPT]              | repair-prune THROUGH_ID
   gc
   v1-check FILE   | v1-export OUTPUT
+  v2-check FILE   | v2-migrate
   help            | version
 
 INPUT or OUTPUT may be '-' for stdin or stdout. stdin requires --size.
@@ -58,6 +59,11 @@ where
             let path = args.path("v1 catalog")?;
             args.end()?;
             return maintenance::check_v1(&path, out);
+        }
+        "v2-check" => {
+            let path = args.path("v2 catalog")?;
+            args.end()?;
+            return maintenance::check_v2(&path, out);
         }
         "init" => {
             let path = args.path("configuration")?;

@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use paritybay::manifest::v1;
+use paritybay::manifest::{v1, v2};
 use paritybay::repair::MaintenanceOutcome;
 use paritybay::{Cluster, Error, RepairState, Result};
 
@@ -25,6 +25,7 @@ pub(super) fn recognizes(command: &str) -> bool {
             | "repair-prune"
             | "gc"
             | "v1-export"
+            | "v2-migrate"
     )
 }
 
@@ -150,6 +151,22 @@ pub(super) fn run(
                 cluster.export_catalog(path)?;
             }
         }
+        "v2-migrate" => {
+            args.end()?;
+            let report = cluster.migrate_v2()?;
+            render::line(
+                out,
+                format_args!(
+                    "v2=true migrated={} objects={} uploads={} nodes={} repairs={} retired={}",
+                    report.switched,
+                    report.objects,
+                    report.uploads,
+                    report.nodes,
+                    report.repairs,
+                    report.retired,
+                ),
+            )?;
+        }
         _ => unreachable!("command table checked"),
     }
     Ok(0)
@@ -167,6 +184,28 @@ pub(super) fn check_v1(path: &Path, out: &mut dyn Write) -> Result<u8> {
         out,
         format_args!(
             "v1=true canonical={canonical} objects={} uploads={} nodes={} repairs={} retired={}",
+            catalog.objects.len(),
+            catalog.uploads.len(),
+            catalog.nodes.len(),
+            catalog.repairs.len(),
+            catalog.retired.len(),
+        ),
+    )?;
+    Ok(0)
+}
+
+pub(super) fn check_v2(path: &Path, out: &mut dyn Write) -> Result<u8> {
+    let file = fs::File::open(path).map_err(|e| io_error("open v2", path, e))?;
+    let mut bytes = Vec::new();
+    file.take(v2::MAX_CATALOG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error("read v2", path, e))?;
+    let catalog = v2::decode(&bytes)?;
+    let canonical = bytes == v2::encode(&catalog)?;
+    render::line(
+        out,
+        format_args!(
+            "v2=true canonical={canonical} objects={} uploads={} nodes={} repairs={} retired={}",
             catalog.objects.len(),
             catalog.uploads.len(),
             catalog.nodes.len(),

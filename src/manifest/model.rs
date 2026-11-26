@@ -321,6 +321,19 @@ pub struct Catalog {
     pub retired: Vec<RetiredFragment>,
 }
 
+/// Outcome of switching a cluster catalog to the compact v2 format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MigrationReport {
+    /// True when this call performed the switch. False means the cluster was
+    /// already on v2; the call still finished any interrupted cleanup.
+    pub switched: bool,
+    pub objects: usize,
+    pub uploads: usize,
+    pub nodes: usize,
+    pub repairs: usize,
+    pub retired: usize,
+}
+
 impl Catalog {
     pub(crate) fn retire_object(&mut self, object: &ObjectGeneration) {
         for stripe in &object.stripes {

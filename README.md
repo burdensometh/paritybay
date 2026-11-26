@@ -65,6 +65,14 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   `nodes` to inspect live, reserved and retired allocations. `node-media`
   changes the class of a drained, unreferenced node. Node removal marks the
   catalog entry and leaves the node directory available for inspection.
+- **Catalog migration** switches the on-disk catalog to the compact v2
+  format with `v2-migrate`: fragments, upload reservations, repair
+  receipts and retired entries reference the node table by index instead
+  of repeating node strings. Existing v1 clusters open directly and keep
+  reading, writing and repairing in v1 until migrated. The switch is an
+  atomic rename, so an interrupted migration leaves the last complete
+  catalog in place and a repeated `v2-migrate` finishes it. `v2-check`
+  verifies a migrated catalog.
 
 `paritybay help` lists all commands. Exit codes 2–7 distinguish invalid
 input, missing entries, conflicts or pending repairs, unavailable capacity,
@@ -80,7 +88,7 @@ for a key, stripe index and shard index. Each stripe search checks the
 current per-node budgets, including earlier placements in the same plan.
 Planning carries prior stripes forward in order.
 
-The v1 implementation supports up to 64 node IDs, including removal
+A cluster supports up to 64 node IDs, including removal
 tombstones. An object can contain up to 512 MiB and 65,536 stripes. One
 multipart part can contain up to 64 MiB. The active staging reservation
 limit and per-node byte budgets are set in the cluster configuration.
@@ -94,14 +102,15 @@ an exclusive cleanup lock. It reclaims retired and unreferenced managed
 files, including abandoned staging data and temporary files. Retired
 fragments continue charging the owning node until cleanup.
 
-The cluster root owns `catalog.v1`, lock files, `nodes/ID/fragments` and
-`uploads/ID`. Node and upload file names carry the generation or session
-and a revision. The catalog records their contents and refuses malformed
-geometry or references. The executable accepts a dedicated directory
-under operator control. Simulated domains model availability of local
-directory nodes. They do not create physical failure isolation. The
-baseline models one unavailable fragment per stripe, and CRC32C detects
-accidental corruption. See [v1 format](FORMAT.md) for the byte layout and
+The cluster root owns `catalog.v1` (or `catalog.v2` after migration),
+lock files, `nodes/ID/fragments` and `uploads/ID`. Node and upload file
+names carry the generation or session and a revision. The catalog records
+their contents and refuses malformed geometry or references. The
+executable accepts a dedicated directory under operator control. Simulated
+domains model availability of local directory nodes. They do not create
+physical failure isolation. The baseline models one unavailable fragment
+per stripe, and CRC32C detects accidental corruption. See
+[catalog formats](FORMAT.md) for the byte layouts and
 [samples](samples/README.md) for the original-format cluster.
 
 ## Verification
@@ -115,10 +124,13 @@ cargo bench --locked --offline --bench hotspots
 
 The demo performs a multipart commit, removes one fragment at a time on
 each assigned node, compares the recovered bytes and SHA-256 digests, then
-heals before the next loss. It also evacuates a draining node and verifies
-a durable v1 export. The benchmark measures a 4 KiB range on a pinned
-object, a 24-node placement search and a degraded reconstruction scan.
-It prints the workload size and timing at each hotspot.
+heals before the next loss. It also evacuates a draining node, verifies a
+durable v1 export and migrates the cluster to the compact v2 catalog. The
+fault-boundary script pauses operations at their durability checkpoints,
+including a catalog migration interrupted before its atomic commit. The
+benchmark measures a 4 KiB range on a pinned object, a 24-node placement
+search and a degraded reconstruction scan. It prints the workload size and
+timing at each hotspot.
 
 To pause an operation, make a gate directory and create
 `BOUNDARY.arm` there. Run the command with `--gates DIR` before the
