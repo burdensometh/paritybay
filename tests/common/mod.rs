@@ -48,11 +48,22 @@ pub fn config() -> Config {
 }
 
 pub fn node(id: &str, domain: &str, media: Media, capacity: u64) -> NodeDomain {
+    node_with_reserve(id, domain, media, capacity, 0)
+}
+
+pub fn node_with_reserve(
+    id: &str,
+    domain: &str,
+    media: Media,
+    capacity: u64,
+    maintenance_reserve: u64,
+) -> NodeDomain {
     NodeDomain {
         id: id.into(),
         domain: domain.into(),
         media,
         capacity,
+        maintenance_reserve,
         state: NodeState::Online,
     }
 }

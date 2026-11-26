@@ -107,6 +107,9 @@ pub struct NodeDomain {
     pub domain: String,
     pub media: Media,
     pub capacity: u64,
+    /// Bytes withheld from foreground writes so heal and rebalance always have
+    /// landing space. Existing reservations keep their original terms.
+    pub maintenance_reserve: u64,
     pub state: NodeState,
 }
 

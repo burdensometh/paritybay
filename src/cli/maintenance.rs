@@ -16,6 +16,7 @@ pub(super) fn recognizes(command: &str) -> bool {
             | "node-add"
             | "node-state"
             | "node-size"
+            | "node-reserve"
             | "node-media"
             | "scan"
             | "heal"
@@ -41,9 +42,11 @@ pub(super) fn run(
                 let node = item.node;
                 let allocations = item.allocation;
                 render::line(out, format_args!(
-                    "node={} domain={} media={} state={} capacity={} free={} current={} uploads={} repairs={} retired={}",
-                    node.id, node.domain, node.media, node.state, node.capacity, item.free, allocations.current,
-                    allocations.uploads, allocations.repairs, allocations.retired,
+                    "node={} domain={} media={} state={} capacity={} reserve={} user_free={} maintenance_free={} current={} uploads={} repairs={} retired={}",
+                    node.id, node.domain, node.media, node.state, node.capacity,
+                    node.maintenance_reserve, item.user_free, item.maintenance_free,
+                    allocations.current, allocations.uploads, allocations.repairs,
+                    allocations.retired,
                 ))?;
             }
         }
@@ -53,13 +56,19 @@ pub(super) fn run(
             let id = node.id.clone();
             render::line_after(out, &id, cluster.add_node(node))?;
         }
-        "node-state" | "node-size" | "node-media" => {
+        "node-state" | "node-size" | "node-reserve" | "node-media" => {
             let id = args.text("node")?;
             let value = args.text("node value")?;
             args.end()?;
             let result = match command {
                 "node-state" => cluster.set_node_state(&id, value.parse()?),
                 "node-media" => cluster.set_node_media(&id, value.parse()?),
+                "node-reserve" => cluster.set_node_reserve(
+                    &id,
+                    value
+                        .parse()
+                        .map_err(|_| Error::Invalid("invalid maintenance reserve".into()))?,
+                ),
                 _ => cluster.set_node_capacity(
                     &id,
                     value

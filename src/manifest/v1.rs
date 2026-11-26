@@ -17,6 +17,10 @@ pub const MAGIC: [u8; 8] = *b"PBAYV1\r\n";
 pub const HEADER_BYTES: usize = 16;
 pub const MAX_CATALOG_BYTES: usize = 64 * 1024 * 1024;
 
+/// Optional node-extension tags. A tag byte follows the state byte only when
+/// the record carries an extension; legacy node records end at state.
+const NODE_TAG_MAINTENANCE_RESERVE: u8 = 4;
+
 pub fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
     validate_catalog(catalog)?;
     let mut out = Encoder(Vec::with_capacity(HEADER_BYTES));
@@ -82,8 +86,9 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
     let staging_limit = input.u64()?;
     let next_id = input.u64()?;
     let mut nodes = BTreeMap::new();
-    for _ in 0..input.count(MAX_NODES, 14)? {
-        let node = input.node()?;
+    let node_count = input.count(MAX_NODES, 14)?;
+    for index in 0..node_count {
+        let node = input.node(index + 1 == node_count)?;
         map_insert(&mut nodes, node.id.clone(), node, "node")?;
     }
     let mut uploads = BTreeMap::new();
@@ -190,6 +195,12 @@ impl Encoder {
             NodeState::Offline => 2,
             NodeState::Removed => 3,
         });
+        // Optional tagged extension. Legacy catalogs end the node record at
+        // the state byte and decode a zero maintenance reserve.
+        if node.maintenance_reserve > 0 {
+            self.u8(NODE_TAG_MAINTENANCE_RESERVE);
+            self.u64(node.maintenance_reserve);
+        }
         Ok(())
     }
 
@@ -316,6 +327,10 @@ impl<'a> Decoder<'a> {
         Ok(self.take(1)?[0])
     }
 
+    fn peek_u8(&self) -> Option<u8> {
+        self.rest.first().copied()
+    }
+
     fn u16(&mut self) -> Result<u16> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
@@ -372,7 +387,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn node(&mut self) -> Result<NodeDomain> {
+    fn node(&mut self, last_in_table: bool) -> Result<NodeDomain> {
         let id = self.string(48)?;
         let domain = self.string(48)?;
         let media = self.media()?;
@@ -384,11 +399,31 @@ impl<'a> Decoder<'a> {
             3 => NodeState::Removed,
             _ => return Err(self.error("unknown node state")),
         };
+        let mut maintenance_reserve = 0;
+        // Extensions are position-based: a tag plus its value must leave room
+        // for the minimum next node record unless this node is the table's
+        // last. Legacy catalogs end at the state byte and take no extension.
+        loop {
+            const TAG_VALUE: usize = 1 + 8; // tag byte + u64 reserve
+            const MIN_NEXT_NODE: usize = 15; // two u16 strings, media, u64, state
+            let remaining = self.rest.len();
+            let room_for_extension = if last_in_table {
+                remaining >= TAG_VALUE
+            } else {
+                remaining >= TAG_VALUE + MIN_NEXT_NODE
+            };
+            if !room_for_extension || self.peek_u8() != Some(NODE_TAG_MAINTENANCE_RESERVE) {
+                break;
+            }
+            self.u8()?;
+            maintenance_reserve = self.u64()?;
+        }
         Ok(NodeDomain {
             id,
             domain,
             media,
             capacity,
+            maintenance_reserve,
             state,
         })
     }

@@ -28,7 +28,8 @@ truncation and trailing bytes. A complete frame is limited to 64 MiB.
 catalog = block_bytes:u32 staging_limit:u64 next_id:u64
           array<node> array<upload> array<object> array<repair> array<retired>
 
-node = id:str domain:str media:u8 capacity:u64 state:u8
+node = id:str domain:str media:u8 capacity:u64 state:u8 [node-extension]
+node-extension = tag:u8(=4) maintenance_reserve:u64
 
 upload = id:u64 key:str expected_bytes:u64 media:u8 domains:u8 condition
          array<part> array<placement>
@@ -51,9 +52,18 @@ retired = node:str generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
 | Media | 0 hot, 1 capacity |
 | Domains | 0 strict, 1 prefer |
 | Node state | 0 online, 1 draining, 2 offline, 3 removed |
+| Node extension | 4 maintenance reserve (u64) |
 | Write condition | 0 any, 1 absent, 2 exact generation |
 | Repair kind | 0 heal, 1 rebalance |
 | Repair state | 0 planned, 1 published, 2 stale, 3 unrecoverable |
+
+A node record written before maintenance reserves ends at its state byte and
+decodes a reserve of zero. When the reserve is non-zero the writer appends tag
+`4` followed by the u64 byte count. The extension is position-based: a decoder
+only treats a byte as a tag when a full tag-plus-value still fits before the
+next node record must begin (or before the payload ends for the final node),
+otherwise the byte starts the next record. Zero-reserve nodes write no
+extension, so a legacy catalog re-encodes to its original bytes.
 
 A fragment consists of raw bytes in
 `nodes/NODE/fragments/GGGGGGGGGGGGGGGG-SSSSSSSS-H-RRRRRRRRRRRRRRRR.pb`.

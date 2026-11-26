@@ -63,8 +63,10 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   new mapping before collection. Set a node to `removed` after active
   fragment, upload, repair and retired references have cleared. Use
   `nodes` to inspect live, reserved and retired allocations. `node-media`
-  changes the class of a drained, unreferenced node. Node removal marks the
-  catalog entry and leaves the node directory available for inspection.
+  changes the class of a drained, unreferenced node, and `node-reserve`
+  changes its maintenance reserve without disturbing existing allocations.
+  Node removal marks the catalog entry and leaves the node directory
+  available for inspection.
 
 `paritybay help` lists all commands. Exit codes 2–7 distinguish invalid
 input, missing entries, conflicts or pending repairs, unavailable capacity,
@@ -84,6 +86,21 @@ The v1 implementation supports up to 64 node IDs, including removal
 tombstones. An object can contain up to 512 MiB and 65,536 stripes. One
 multipart part can contain up to 64 MiB. The active staging reservation
 limit and per-node byte budgets are set in the cluster configuration.
+
+Each node keeps a **maintenance reserve**: a byte portion withheld from
+foreground writes so heal and rebalance always have landing space even when
+the node is otherwise full. A direct PUT and a multipart reservation draw on
+the same user-writable budget (`capacity − reserve − allocated`) and are
+refused once it is exhausted. Repair and rebalance ignore the reserve and may
+use the whole remaining capacity, while still honoring the original media
+class and domain policy of the stripe. The reserve is configured cluster-wide
+with `maintenance_reserve` and can be overridden per node with a sixth
+`node` field or adjusted live with `node-reserve`. Raising the reserve never
+revokes an already promised multipart reservation: existing sessions keep
+their original placement terms and still finish; only newly planned writes
+observe the tighter budget. `nodes` reports `user_free`, `maintenance_free`
+(which includes the reserve) and the separate `retired` charge; retired
+fragments remain charged until `gc`.
 
 Both upload paths write and sync fragment files before an atomic catalog
 replacement. The catalog and node fsync operations use the underlying

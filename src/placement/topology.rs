@@ -8,7 +8,10 @@ use super::Ledger;
 pub struct NodeUsage {
     pub node: NodeDomain,
     pub allocation: super::Allocation,
-    pub free: u64,
+    /// Free space counted against the foreground write budget.
+    pub user_free: u64,
+    /// Free space for heal and rebalance, including the maintenance reserve.
+    pub maintenance_free: u64,
 }
 
 impl Cluster {
@@ -56,11 +59,36 @@ impl Cluster {
             )));
         }
         let node = mutable_node(&mut txn.catalog, id)?;
+        if node.maintenance_reserve >= capacity {
+            return Err(Error::Invalid(format!(
+                "node {id} capacity must stay above its maintenance reserve {}",
+                node.maintenance_reserve
+            )));
+        }
         if node.capacity == capacity {
             return Ok(());
         }
         node.capacity = capacity;
         txn.commit("node-capacity")
+    }
+
+    /// Adjust the maintenance reserve. Committed upload reservations keep
+    /// their original terms: the reserve only constrains newly planned
+    /// foreground writes, so existing allocations are not rejected here.
+    pub fn set_node_reserve(&self, id: &str, reserve: u64) -> Result<()> {
+        let mut txn = self.transaction()?;
+        let node = mutable_node(&mut txn.catalog, id)?;
+        if reserve >= node.capacity {
+            return Err(Error::Invalid(format!(
+                "node {id} maintenance reserve must stay below capacity {}",
+                node.capacity
+            )));
+        }
+        if node.maintenance_reserve == reserve {
+            return Ok(());
+        }
+        node.maintenance_reserve = reserve;
+        txn.commit("node-reserve")
     }
 
     pub fn set_node_media(&self, id: &str, media: Media) -> Result<()> {
@@ -110,7 +138,8 @@ impl Cluster {
             .map(|node| {
                 let allocation = ledger.for_node(&node.id);
                 NodeUsage {
-                    free: node.capacity - allocation.total(),
+                    user_free: ledger.user_free(&node),
+                    maintenance_free: ledger.maintenance_free(&node),
                     node,
                     allocation,
                 }

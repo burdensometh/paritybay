@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             domain: format!("d{}", i % 6),
             media: Media::Hot,
             capacity: 64 * 1024 * 1024,
+            maintenance_reserve: 0,
             state: NodeState::Online,
         })
         .collect();
@@ -43,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Config {
             block_bytes: block,
             staging_limit: 16 * 1024 * 1024,
+            maintenance_reserve: 0,
             nodes,
         },
     )?;

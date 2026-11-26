@@ -23,9 +23,10 @@ Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
   get KEY OUTPUT [--range START:END|START:|:SIZE] [--report]
   stat KEY        | list          | delete KEY [--if any|GEN]
   inspect KEY     | scan [KEY]    | fragment-path KEY STRIPE SHARD
-  nodes           | node-add 'ID,DOMAIN,MEDIA,CAPACITY,STATE'
+  nodes           | node-add 'ID,DOMAIN,MEDIA,CAPACITY,STATE[,RESERVE]'
   node-state NODE online|offline|draining|removed
-  node-size NODE CAPACITY         | node-media NODE hot|capacity
+  node-size NODE CAPACITY         | node-reserve NODE RESERVE
+  node-media NODE hot|capacity
   heal [KEY]      | rebalance [KEY] | replay [ATTEMPT]
   repair-log [ATTEMPT]              | repair-prune THROUGH_ID
   gc

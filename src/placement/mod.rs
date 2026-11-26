@@ -2,7 +2,7 @@ mod ledger;
 mod search;
 mod topology;
 
-pub use ledger::{Allocation, Ledger};
+pub use ledger::{Allocation, Budget, Ledger};
 pub use search::{DomainHealth, PlacementPlanner};
 pub use topology::NodeUsage;
 

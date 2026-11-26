@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::codec::stripe_lengths;
 use crate::manifest::Catalog;
-use crate::{Error, RepairState, Result};
+use crate::{Error, NodeDomain, RepairState, Result};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Allocation {
@@ -15,6 +15,25 @@ pub struct Allocation {
 impl Allocation {
     pub fn total(self) -> u64 {
         self.current + self.uploads + self.repairs + self.retired
+    }
+}
+
+/// Foreground writes (PUT and multipart reservations) stop at the
+/// maintenance reserve. Repairs and rebalancing may use the whole budget so
+/// the reserved space is always available for healing and evacuation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Budget {
+    UserWritable,
+    Maintenance,
+}
+
+impl Budget {
+    fn fits(self, node: &NodeDomain, allocated: u64, bytes: u64) -> bool {
+        let limit = match self {
+            Budget::UserWritable => node.capacity.saturating_sub(node.maintenance_reserve),
+            Budget::Maintenance => node.capacity,
+        };
+        limit.saturating_sub(allocated) >= bytes
     }
 }
 
@@ -81,6 +100,25 @@ impl Ledger {
 
     pub fn allocated(&self, node: &str) -> u64 {
         self.for_node(node).total()
+    }
+
+    /// Bytes a foreground writer may still claim on this node. The
+    /// maintenance reserve never appears as user-writable space.
+    pub fn user_free(&self, node: &NodeDomain) -> u64 {
+        node.capacity
+            .saturating_sub(node.maintenance_reserve)
+            .saturating_sub(self.allocated(&node.id))
+    }
+
+    /// Bytes left for heal or rebalance, including the maintenance reserve.
+    pub fn maintenance_free(&self, node: &NodeDomain) -> u64 {
+        node
+            .capacity
+            .saturating_sub(self.allocated(&node.id))
+    }
+
+    pub fn fits(&self, node: &NodeDomain, bytes: u64, budget: Budget) -> bool {
+        budget.fits(node, self.allocated(&node.id), bytes)
     }
 
     pub(crate) fn reserve(&mut self, node: &str, bytes: u32) -> Result<()> {

@@ -7,7 +7,7 @@ use crate::{
     Catalog, DomainPolicy, Error, Media, NodeDomain, ObjectGeneration, Result, StripeManifest,
 };
 
-use super::Ledger;
+use super::{Budget, Ledger};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DomainHealth {
@@ -78,6 +78,7 @@ impl<'a> PlacementPlanner<'a> {
                 lengths,
                 media,
                 policy,
+                Budget::UserWritable,
             )?;
             for (node, bytes) in nodes.iter().zip(lengths) {
                 trial.reserve(node, bytes)?;
@@ -98,6 +99,7 @@ fn plan_stripe(
     lengths: [u32; SHARDS],
     media: Media,
     policy: DomainPolicy,
+    budget: Budget,
 ) -> Result<[String; SHARDS]> {
     let candidates = std::array::from_fn::<_, SHARDS, _>(|shard| {
         ranked(
@@ -108,6 +110,7 @@ fn plan_stripe(
             shard as u8,
             lengths[shard],
             media,
+            budget,
         )
     });
     let best_possible = candidates
@@ -168,6 +171,7 @@ fn ranked<'a>(
     shard: u8,
     bytes: u32,
     media: Media,
+    budget: Budget,
 ) -> Vec<&'a NodeDomain> {
     let mut ranked_nodes: Vec<_> = catalog
         .nodes
@@ -175,7 +179,7 @@ fn ranked<'a>(
         .filter(|node| {
             node.state.can_place()
                 && node.media == media
-                && node.capacity.saturating_sub(ledger.allocated(&node.id)) >= u64::from(bytes)
+                && ledger.fits(node, u64::from(bytes), budget)
         })
         .map(|node| (Reverse(rank(key, stripe, shard, &node.id)), node))
         .collect();
@@ -230,6 +234,7 @@ pub(crate) fn replacement(
         shard,
         current.bytes,
         object.media,
+        Budget::Maintenance,
     );
     candidates
         .into_iter()

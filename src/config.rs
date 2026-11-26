@@ -9,11 +9,13 @@ const CONFIG_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BLOCK_BYTES: u32 = 4 * 1024 * 1024;
 const DEFAULT_BLOCK_BYTES: u32 = 64 * 1024;
 const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
+const DEFAULT_MAINTENANCE_RESERVE: u64 = 0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub block_bytes: u32,
     pub staging_limit: u64,
+    pub maintenance_reserve: u64,
     pub nodes: Vec<NodeDomain>,
 }
 
@@ -31,6 +33,7 @@ impl Config {
         let mut config = Self {
             block_bytes: DEFAULT_BLOCK_BYTES,
             staging_limit: DEFAULT_STAGING_LIMIT,
+            maintenance_reserve: DEFAULT_MAINTENANCE_RESERVE,
             nodes: Vec::new(),
         };
 
@@ -61,7 +64,14 @@ impl Config {
                         .parse()
                         .map_err(|_| parse_error("invalid staging_limit"))?;
                 }
-                "node" => config.nodes.push(parse_node(value)?),
+                "maintenance_reserve" => {
+                    config.maintenance_reserve = value
+                        .parse()
+                        .map_err(|_| parse_error("invalid maintenance_reserve"))?;
+                }
+                "node" => config
+                    .nodes
+                    .push(parse_node_with_default(value, config.maintenance_reserve)?),
                 _ => return Err(parse_error("unknown setting")),
             }
         }
@@ -95,11 +105,26 @@ impl Config {
 }
 
 pub fn parse_node(value: &str) -> Result<NodeDomain> {
+    parse_node_with_default(value, DEFAULT_MAINTENANCE_RESERVE)
+}
+
+pub(crate) fn parse_node_with_default(value: &str, default_reserve: u64) -> Result<NodeDomain> {
     let fields: Vec<_> = value.split(',').map(str::trim).collect();
-    let [id, domain, media, capacity, state] = fields.as_slice() else {
-        return Err(Error::Invalid(
-            "node requires id, domain, media, capacity, state".into(),
-        ));
+    let (id, domain, media, capacity, state, reserve) = match fields.as_slice() {
+        [id, domain, media, capacity, state] => {
+            (id, domain, media, capacity, state, default_reserve)
+        }
+        [id, domain, media, capacity, state, reserve] => {
+            let reserve = reserve
+                .parse()
+                .map_err(|_| Error::Invalid("invalid node maintenance reserve".into()))?;
+            (id, domain, media, capacity, state, reserve)
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "node requires id, domain, media, capacity, state[, maintenance_reserve]".into(),
+            ))
+        }
     };
     let node = NodeDomain {
         id: (*id).into(),
@@ -108,6 +133,7 @@ pub fn parse_node(value: &str) -> Result<NodeDomain> {
         capacity: capacity
             .parse()
             .map_err(|_| Error::Invalid("invalid node capacity".into()))?,
+        maintenance_reserve: reserve,
         state: state.parse()?,
     };
     validate_node(&node)?;
@@ -132,6 +158,12 @@ pub(crate) fn validate_node(node: &NodeDomain) -> Result<()> {
     if node.capacity == 0 {
         return Err(Error::Invalid(format!(
             "node {} has zero capacity",
+            node.id
+        )));
+    }
+    if node.maintenance_reserve >= node.capacity {
+        return Err(Error::Invalid(format!(
+            "node {} maintenance reserve must stay below its capacity",
             node.id
         )));
     }
