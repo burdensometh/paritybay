@@ -200,6 +200,12 @@ pub(super) fn maintenance(out: &mut dyn Write, report: &MaintenanceReport) -> Re
             event.attempt, event.detail,
         ))?;
     }
+    line(out, format_args!(
+        "budget ledger_builds={} ledger_refreshes={} publication_rechecks={}",
+        report.budget.ledger_builds,
+        report.budget.ledger_refreshes,
+        report.budget.publication_rechecks,
+    ))?;
     if let Some(removed) = &report.collection {
         collection(out, removed)?;
     }

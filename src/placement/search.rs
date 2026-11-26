@@ -175,7 +175,7 @@ fn ranked<'a>(
         .filter(|node| {
             node.state.can_place()
                 && node.media == media
-                && node.capacity.saturating_sub(ledger.allocated(&node.id)) >= u64::from(bytes)
+                && ledger.fits(&node.id, node.capacity, bytes)
         })
         .map(|node| (Reverse(rank(key, stripe, shard, &node.id)), node))
         .collect();
@@ -221,10 +221,25 @@ pub(crate) fn replacement(
     mode: ReplacementPolicy,
 ) -> Result<String> {
     let ledger = Ledger::from_catalog(catalog, None)?;
+    replacement_with_ledger(catalog, &ledger, object, stripe, shard, mode)
+}
+
+/// Select a replacement against a caller-provided budget. Maintenance keeps
+/// one ledger for a whole repair round and books each planned copy into it,
+/// so later stripes decide against the reservations of earlier ones without
+/// rebuilding the full-directory totals.
+pub(crate) fn replacement_with_ledger(
+    catalog: &Catalog,
+    ledger: &Ledger,
+    object: &ObjectGeneration,
+    stripe: &StripeManifest,
+    shard: u8,
+    mode: ReplacementPolicy,
+) -> Result<String> {
     let current = &stripe.fragments[usize::from(shard)];
     let candidates = ranked(
         catalog,
-        &ledger,
+        ledger,
         &object.key,
         stripe.index,
         shard,

@@ -1,12 +1,14 @@
 use crate::codec::checksum;
 use crate::files;
 use crate::manifest::{sequence, FragmentAddress};
-use crate::placement::{replacement, replacement_valid, ReplacementPolicy};
+use crate::placement::{replacement, replacement_valid, replacement_with_ledger, Ledger, ReplacementPolicy};
 use crate::readpath::StripeReader;
 use crate::{
     Boundary, Catalog, Cluster, Error, ObjectGeneration, RepairAttempt, RepairKind, RepairState,
     Result, StripeManifest,
 };
+
+use super::budget::RepairBudget;
 
 pub(super) enum Planning {
     Ready(RepairAttempt),
@@ -23,6 +25,7 @@ impl Cluster {
         shard: u8,
         kind: RepairKind,
         policy: ReplacementPolicy,
+        mut budget: Option<&mut RepairBudget>,
     ) -> Result<Planning> {
         let mut txn = self.transaction()?;
         let Some(current) = txn
@@ -39,7 +42,21 @@ impl Cluster {
         if let Some(pending) = pending_for_stripe(&txn.catalog, current.generation, stripe.index) {
             return Ok(Planning::Busy(pending.id));
         }
-        let node = match replacement(&txn.catalog, current, stripe, shard, policy) {
+        let node = match budget.as_mut() {
+            Some(round_budget) => {
+                let ledger = round_budget.sync(&txn.catalog)?;
+                replacement_with_ledger(
+                    &txn.catalog,
+                    ledger,
+                    current,
+                    stripe,
+                    shard,
+                    policy,
+                )
+            }
+            None => replacement(&txn.catalog, current, stripe, shard, policy),
+        };
+        let node = match node {
             Ok(node) => node,
             Err(Error::Capacity(message)) => return Ok(Planning::NoTarget(message)),
             Err(error) => return Err(error),
@@ -48,7 +65,7 @@ impl Cluster {
         let from = stripe.fragments[usize::from(shard)].clone();
         let id = sequence(&mut txn.catalog)?;
         let mut to = from.clone();
-        to.node = node;
+        to.node = node.clone();
         to.revision = id;
         let attempt = RepairAttempt {
             id,
@@ -63,6 +80,13 @@ impl Cluster {
         };
         txn.catalog.repairs.insert(id, attempt.clone());
         txn.commit("repair-plan")?;
+        if let Some(round_budget) = budget.as_mut() {
+            // The plan now owns a repair reservation on the target node.
+            round_budget
+                .ledger_mut()
+                .book_repair(&node, attempt.to.bytes)?;
+            round_budget.adopt(&self.catalog()?);
+        }
         Ok(Planning::Ready(attempt))
     }
 
@@ -74,7 +98,9 @@ impl Cluster {
             .filter(|attempt| attempt.state == RepairState::Planned)
             .map(|attempt| attempt.id)
             .collect();
-        ids.into_iter().map(|id| self.run_repair(id)).collect()
+        ids.into_iter()
+            .map(|id| self.run_repair_with_budget(id, None))
+            .collect()
     }
 
     pub fn repair_attempt(&self, id: u64) -> Result<RepairAttempt> {
@@ -85,6 +111,14 @@ impl Cluster {
     }
 
     pub fn run_repair(&self, id: u64) -> Result<RepairAttempt> {
+        self.run_repair_with_budget(id, None)
+    }
+
+    pub(super) fn run_repair_with_budget(
+        &self,
+        id: u64,
+        budget: Option<&mut RepairBudget>,
+    ) -> Result<RepairAttempt> {
         let _pin = self.pin_fragments()?;
         let catalog = self.catalog()?;
         let attempt = catalog.repairs.get(&id).ok_or_else(|| no_repair(id))?;
@@ -92,7 +126,7 @@ impl Cluster {
             return Ok(attempt.clone());
         }
         let Some((_, stripe)) = expected_stripe(&catalog, attempt) else {
-            return self.finish_repair(id, CopyStatus::Stale);
+            return self.finish_repair(id, CopyStatus::Stale, budget);
         };
 
         self.checkpoint(Boundary::BeforeRepairCopy, id.to_string())?;
@@ -103,7 +137,11 @@ impl Cluster {
                 None => match reader.rebuild(attempt.from.shard) {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        return self.finish_repair(id, CopyStatus::BadSources(error.to_string()))
+                        return self.finish_repair(
+                            id,
+                            CopyStatus::BadSources(error.to_string()),
+                            budget,
+                        )
                     }
                 },
             };
@@ -114,7 +152,7 @@ impl Cluster {
                 )));
             }
         }
-        self.finish_repair(id, CopyStatus::Verified)
+        self.finish_repair(id, CopyStatus::Verified, budget)
     }
 
     fn copy_already_present(&self, attempt: &RepairAttempt) -> Result<bool> {
@@ -132,7 +170,12 @@ impl Cluster {
         }
     }
 
-    fn finish_repair(&self, id: u64, copy: CopyStatus) -> Result<RepairAttempt> {
+    fn finish_repair(
+        &self,
+        id: u64,
+        copy: CopyStatus,
+        mut budget: Option<&mut RepairBudget>,
+    ) -> Result<RepairAttempt> {
         let mut txn = self.transaction()?;
         let mut attempt = txn
             .catalog
@@ -144,7 +187,33 @@ impl Cluster {
             return Ok(attempt);
         }
 
-        let still_expected = expected_stripe(&txn.catalog, &attempt).is_some();
+        // Re-derive capacity and placement eligibility against the catalog as
+        // it stands at publication time. Reservations started by other
+        // processes between planning and this point are visible here.
+        let eligible = expected_stripe(&txn.catalog, &attempt).is_some();
+        let target = txn
+            .catalog
+            .nodes
+            .get(&attempt.to.node)
+            .ok_or_else(|| {
+                Error::Corrupt(format!(
+                    "repair {} references unknown node {}",
+                    attempt.id, attempt.to.node
+                ))
+            })?;
+        let target_capacity = target.capacity;
+        let capacity_ok = match budget.as_mut() {
+            Some(round_budget) => {
+                round_budget.note_recheck();
+                let ledger = round_budget.sync(&txn.catalog)?;
+                ledger.fits(&attempt.to.node, target_capacity, attempt.to.bytes)
+            }
+            None => {
+                let ledger = Ledger::from_catalog(&txn.catalog, None)?;
+                ledger.fits(&attempt.to.node, target_capacity, attempt.to.bytes)
+            }
+        };
+        let still_expected = eligible && capacity_ok;
         let retire_old = match (still_expected, copy) {
             (true, CopyStatus::Verified) => {
                 let object = txn
@@ -165,7 +234,11 @@ impl Cluster {
             }
             _ => {
                 attempt.state = RepairState::Stale;
-                attempt.detail = "source mapping or target eligibility changed".into();
+                attempt.detail = if eligible {
+                    "target capacity no longer fits at publication".into()
+                } else {
+                    "source mapping or target eligibility changed".into()
+                };
                 false
             }
         };
@@ -178,6 +251,10 @@ impl Cluster {
             .retire_fragment(attempt.generation, attempt.stripe, retired);
         txn.catalog.repairs.insert(id, attempt.clone());
         txn.commit("repair-publish")?;
+        if let Some(budget) = budget {
+            apply_publication_delta(budget, &attempt)?;
+            budget.adopt(&self.catalog()?);
+        }
         Ok(attempt)
     }
 
@@ -199,6 +276,35 @@ enum CopyStatus {
     Verified,
     Stale,
     BadSources(String),
+}
+
+/// Mirror a publication decision into the round ledger so later stripes keep
+/// deciding against the reservations already made in this round.
+fn apply_publication_delta(
+    budget: &mut RepairBudget,
+    attempt: &RepairAttempt,
+) -> Result<()> {
+    let ledger = budget.ledger_mut();
+    match attempt.state {
+        RepairState::Published => {
+            // Current fragment moves off the source node; the target's repair
+            // reservation converts into a current fragment and the source file
+            // is retired but keeps charging its node until collection.
+            ledger.shift_repair_to_current(&attempt.to.node, attempt.to.bytes)?;
+            ledger.shift_current_to_retired(&attempt.from.node, attempt.from.bytes)?;
+        }
+        RepairState::Stale => {
+            // The reserved copy never became current and is itself retired;
+            // its bytes keep charging the target node until collection runs.
+            ledger.shift_repair_to_retired(&attempt.to.node, attempt.to.bytes)?;
+        }
+        RepairState::Unrecoverable => {
+            // No durable copy was produced, so the reservation is released.
+            ledger.release_repair(&attempt.to.node, attempt.to.bytes)?;
+        }
+        RepairState::Planned => {}
+    }
+    Ok(())
 }
 
 fn no_repair(id: u64) -> Error {

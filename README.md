@@ -60,7 +60,16 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
 - **Rebalance** moves shards off draining and offline nodes to viable
   same-media placements. It also improves shared-domain layouts when a
   stronger placement is available. The repair transaction publishes the
-  new mapping before collection. Set a node to `removed` after active
+  new mapping before collection. A maintenance round keeps one capacity
+  ledger for every stripe it touches: per-node totals are aggregated once
+  and then updated incrementally as plans book target reservations,
+  publications convert them into current fragments and stale plans
+  retire their copies. Each plan and publication still re-derives
+  capacity and eligibility against the catalog as it stands at that
+  moment, so reservations started by other processes are honored;
+  foreign changes force at most one ledger rebuild for the round. The
+  report's `budget` line prints the build, refresh and recheck counts.
+  Set a node to `removed` after active
   fragment, upload, repair and retired references have cleared. Use
   `nodes` to inspect live, reserved and retired allocations. `node-media`
   changes the class of a drained, unreferenced node. Node removal marks the
@@ -117,8 +126,10 @@ The demo performs a multipart commit, removes one fragment at a time on
 each assigned node, compares the recovered bytes and SHA-256 digests, then
 heals before the next loss. It also evacuates a draining node and verifies
 a durable v1 export. The benchmark measures a 4 KiB range on a pinned
-object, a 24-node placement search and a degraded reconstruction scan.
-It prints the workload size and timing at each hotspot.
+object, a 24-node placement search, a degraded reconstruction scan, the
+cost of one full-directory ledger aggregation, and a multi-stripe
+rebalance round that reuses a single cached ledger. It prints the
+workload size and timing at each hotspot.
 
 To pause an operation, make a gate directory and create
 `BOUNDARY.arm` there. Run the command with `--gates DIR` before the

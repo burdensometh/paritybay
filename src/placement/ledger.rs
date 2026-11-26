@@ -83,15 +83,99 @@ impl Ledger {
         self.for_node(node).total()
     }
 
+    /// Copy of the per-node bucket totals, keyed by node id.
+    pub fn snapshot(&self) -> BTreeMap<String, Allocation> {
+        self.nodes.clone()
+    }
+
+    /// Whether `bytes` more bytes still fit inside the node's budget.
+    pub fn fits(&self, node: &str, capacity: u64, bytes: u32) -> bool {
+        capacity.saturating_sub(self.allocated(node)) >= u64::from(bytes)
+    }
+
     pub(crate) fn reserve(&mut self, node: &str, bytes: u32) -> Result<()> {
         self.charge(node, bytes, Charge::Upload)
     }
 
-    fn charge(&mut self, node: &str, bytes: u32, charge: Charge) -> Result<()> {
-        let allocation = self
-            .nodes
+    /// Charge a freshly planned repair target. The reservation stays until the
+    /// copy publishes or the plan is discarded.
+    pub(crate) fn book_repair(&mut self, node: &str, bytes: u32) -> Result<()> {
+        self.charge(node, bytes, Charge::Repair)
+    }
+
+    /// Publish a reserved repair copy as a current fragment on its node.
+    pub(crate) fn shift_repair_to_current(
+        &mut self,
+        node: &str,
+        bytes: u32,
+    ) -> Result<()> {
+        let allocation = self.require(node)?;
+        allocation.repairs = allocation
+            .repairs
+            .checked_sub(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation underflow for node {node}")))?;
+        allocation.current = allocation
+            .current
+            .checked_add(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation overflow for node {node}")))?;
+        Ok(())
+    }
+
+    /// Retire a current fragment without reclaiming its bytes; retired files
+    /// keep charging the node until collection removes them.
+    pub(crate) fn shift_current_to_retired(
+        &mut self,
+        node: &str,
+        bytes: u32,
+    ) -> Result<()> {
+        let allocation = self.require(node)?;
+        allocation.current = allocation
+            .current
+            .checked_sub(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation underflow for node {node}")))?;
+        allocation.retired = allocation
+            .retired
+            .checked_add(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation overflow for node {node}")))?;
+        Ok(())
+    }
+
+    /// Discard a reservation that never became a current fragment.
+    pub(crate) fn release_repair(&mut self, node: &str, bytes: u32) -> Result<()> {
+        let allocation = self.require(node)?;
+        allocation.repairs = allocation
+            .repairs
+            .checked_sub(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation underflow for node {node}")))?;
+        Ok(())
+    }
+
+    /// Retire the reserved target of a repair that never published.
+    pub(crate) fn shift_repair_to_retired(
+        &mut self,
+        node: &str,
+        bytes: u32,
+    ) -> Result<()> {
+        let allocation = self.require(node)?;
+        allocation.repairs = allocation
+            .repairs
+            .checked_sub(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation underflow for node {node}")))?;
+        allocation.retired = allocation
+            .retired
+            .checked_add(u64::from(bytes))
+            .ok_or_else(|| Error::Corrupt(format!("allocation overflow for node {node}")))?;
+        Ok(())
+    }
+
+    fn require(&mut self, node: &str) -> Result<&mut Allocation> {
+        self.nodes
             .get_mut(node)
-            .ok_or_else(|| Error::Corrupt(format!("allocation references unknown node {node}")))?;
+            .ok_or_else(|| Error::Corrupt(format!("allocation references unknown node {node}")))
+    }
+
+    fn charge(&mut self, node: &str, bytes: u32, charge: Charge) -> Result<()> {
+        let allocation = self.require(node)?;
         let bytes = u64::from(bytes);
         allocation
             .total()

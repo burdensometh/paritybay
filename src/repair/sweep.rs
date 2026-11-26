@@ -7,6 +7,7 @@ use crate::{
     Catalog, Cluster, Error, ObjectGeneration, RepairAttempt, RepairKind, RepairState, Result,
 };
 
+use super::budget::RepairBudget;
 use super::{CollectionReport, Planning};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -16,6 +17,19 @@ pub struct ScanTotals {
     pub recoverable: usize,
     pub unrecoverable: usize,
     pub parity_mismatch: usize,
+}
+
+/// Capacity-accounting work performed by one maintenance round. A round that
+/// repairs several stripes builds the full per-node totals once and then keeps
+/// a single ledger current incrementally.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BudgetReport {
+    /// Full-directory ledger constructions, including the initial build.
+    pub ledger_builds: usize,
+    /// Rebuilds forced because another writer changed the catalog mid-round.
+    pub ledger_refreshes: usize,
+    /// Publication-time capacity and eligibility rechecks.
+    pub publication_rechecks: usize,
 }
 
 impl ScanTotals {
@@ -67,6 +81,7 @@ pub struct MaintenanceReport {
     pub scan: ScanTotals,
     pub events: Vec<MaintenanceEvent>,
     pub collection: Option<CollectionReport>,
+    pub budget: BudgetReport,
 }
 
 impl Cluster {
@@ -111,14 +126,32 @@ impl Cluster {
             },
             events: Vec::new(),
             collection: None,
+            budget: BudgetReport::default(),
         };
 
+        // One budget serves the whole round: each planned copy is booked into
+        // the shared ledger, so repairing many stripes costs one full catalog
+        // aggregation instead of one per replacement search.
+        let mut budget = None;
         for snapshot in objects {
             for original_stripe in &snapshot.stripes {
                 let inspected = self.inspect_stripe(&catalog, snapshot.generation, original_stripe);
                 report.scan.count(inspected.verdict);
-                self.maintain_stripe(snapshot, &catalog, inspected, &mut report)?;
+                self.maintain_stripe(
+                    snapshot,
+                    &catalog,
+                    inspected,
+                    &mut budget,
+                    &mut report,
+                )?;
             }
+        }
+        if let Some(budget) = &budget {
+            report.budget = BudgetReport {
+                ledger_builds: budget.full_builds,
+                ledger_refreshes: budget.refreshes,
+                publication_rechecks: budget.rechecks,
+            };
         }
         Ok(report)
     }
@@ -128,6 +161,7 @@ impl Cluster {
         snapshot: &ObjectGeneration,
         initial: &Catalog,
         inspected: StripeInspection,
+        budget: &mut Option<RepairBudget>,
         report: &mut MaintenanceReport,
     ) -> Result<()> {
         let kind = report.kind;
@@ -178,9 +212,23 @@ impl Cluster {
             let mut no_target = None;
             let mut advanced = false;
             for (shard, policy) in choices {
-                match self.plan_repair(object, stripe, shard, kind, policy)? {
+                let round_budget = match budget.as_mut() {
+                    Some(round_budget) => round_budget,
+                    None => budget.get_or_insert(RepairBudget::open(catalog)?),
+                };
+                match self.plan_repair(
+                    object,
+                    stripe,
+                    shard,
+                    kind,
+                    policy,
+                    Some(round_budget),
+                )? {
                     Planning::Ready(attempt) => {
-                        let attempt = self.run_repair(attempt.id)?;
+                        let attempt = self.run_repair_with_budget(
+                            attempt.id,
+                            Some(budget.as_mut().expect("opened above")),
+                        )?;
                         advanced = attempt.state == RepairState::Published;
                         report.events.push(attempt_event(object, &attempt));
                         break;

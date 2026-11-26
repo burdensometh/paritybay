@@ -3,7 +3,7 @@ use std::io::{self, Cursor};
 use std::time::{Duration, Instant};
 
 use paritybay::manifest::FragmentAddress;
-use paritybay::placement::PlacementPlanner;
+use paritybay::placement::{Ledger, PlacementPlanner};
 use paritybay::readpath::RangeRequest;
 use paritybay::upload::UploadOptions;
 use paritybay::{Cluster, Condition, Config, DomainPolicy, Media, NodeDomain, NodeState};
@@ -117,6 +117,128 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         elapsed,
         runs,
         write.stripes,
+        "stripes",
+    );
+
+    repair_ledger_benchmark()?;
+    Ok(())
+}
+
+/// Baseline cost of the full-directory aggregation versus the cached ledger
+/// used across a multi-stripe repair round. Both halves print machine-parseable
+/// `benchmark=` lines so the saved runs can be compared directly.
+fn repair_ledger_benchmark() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!(
+        "paritybay-repair-budget-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root)?;
+    let _clean = Workspace(root.clone());
+    let block = 32 * 1024;
+    let nodes: Vec<NodeDomain> = (0..24)
+        .map(|i| NodeDomain {
+            id: format!("h{i:02}"),
+            domain: format!("d{}", i % 6),
+            media: Media::Hot,
+            capacity: 512 * 1024 * 1024,
+            state: NodeState::Online,
+        })
+        .collect();
+    let cluster = Cluster::create(
+        &root,
+        Config {
+            block_bytes: block,
+            staging_limit: 512 * 1024 * 1024,
+            nodes,
+        },
+    )?;
+    // Ten objects of ~2 MiB each populate roughly 320 stripes and 960
+    // fragments, so a full ledger walk touches a realistic fragment table.
+    let object_bytes = 2 * 1024 * 1024_usize;
+    let input: Vec<u8> = (0..object_bytes)
+        .map(|i| i.wrapping_mul(37) as u8)
+        .collect();
+    for object in 0..10 {
+        cluster
+            .put(
+                &format!("repair/{object}"),
+                UploadOptions {
+                    bytes: input.len() as u64,
+                    media: Media::Hot,
+                    domains: DomainPolicy::Strict,
+                    condition: Condition::Absent,
+                },
+                &mut Cursor::new(&input),
+            )
+            .unwrap();
+    }
+    let catalog = cluster.catalog()?;
+    let stripe_total: usize = catalog
+        .objects
+        .values()
+        .map(|object| object.stripes.len())
+        .sum();
+
+    let runs = 200;
+    let elapsed = timed(
+        |_| {
+            let ledger = Ledger::from_catalog(&catalog, None).unwrap();
+            black_box(ledger.allocated("h00"));
+        },
+        runs,
+    );
+    print(
+        "full-ledger-aggregation",
+        elapsed,
+        runs,
+        stripe_total,
+        "stripes",
+    );
+
+    // Force off-node replacements by draining every node currently holding a
+    // shard-0 of the first stripe. A rebalance round then evacuates every
+    // affected stripe using replacement nodes, with the ledger cached across
+    // the whole round instead of rebuilt per replacement.
+    let mut drained = std::collections::BTreeSet::new();
+    for object in 0..10 {
+        let target = cluster.object(&format!("repair/{object}"))?;
+        drained.insert(target.stripes[0].fragments[0].node.clone());
+    }
+    for node in &drained {
+        cluster.set_node_state(node, NodeState::Draining)?;
+    }
+
+    // The first run performs the complete evacuation; later runs find the
+    // drained nodes already unreferenced and only pay for the scan.
+    let runs = 3;
+    let mut evacuated = 0usize;
+    let elapsed = timed(
+        |_| {
+            let report = cluster.rebalance(None).unwrap();
+            assert_eq!(report.budget.ledger_refreshes, 0);
+            if report.budget.ledger_builds > 0 {
+                assert_eq!(report.budget.ledger_builds, 1);
+            }
+            evacuated += report
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.outcome,
+                        paritybay::repair::MaintenanceOutcome::Published
+                    )
+                })
+                .count();
+            black_box(report);
+        },
+        runs,
+    );
+    assert!(evacuated >= 10, "the round repaired the damaged stripes");
+    print(
+        "cached-rebalance-round",
+        elapsed,
+        runs,
+        evacuated,
         "stripes",
     );
     Ok(())
