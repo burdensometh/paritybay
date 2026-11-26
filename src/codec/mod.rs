@@ -1,5 +1,7 @@
 mod crc32c;
+mod stream;
 pub use crc32c::{checksum, Crc32c};
+pub use stream::{FragmentStream, StreamFault, STREAM_WINDOW};
 
 use std::io::{self, Read};
 
@@ -51,6 +53,18 @@ fn xor_prefix(first: &[u8], second: &[u8], output: usize) -> Vec<u8> {
         *dst ^= src;
     }
     bytes
+}
+
+/// XOR two equal-length windows in place: `window ^= other`.
+///
+/// Streaming reconstruction keeps only fixed-size windows in memory, so the
+/// peak buffer stays independent of the shard length. Absent tail bytes of a
+/// shorter shard 1 are represented by callers passing zero-filled windows.
+pub fn xor_window(window: &mut [u8], other: &[u8]) {
+    debug_assert_eq!(window.len(), other.len());
+    for (dst, src) in window.iter_mut().zip(other) {
+        *dst ^= *src;
+    }
 }
 
 /// Reconstruct one logical shard from the other two already verified shards.

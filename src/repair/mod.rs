@@ -1,5 +1,6 @@
 mod collect;
 mod journal;
+mod stream;
 mod sweep;
 
 pub use collect::CollectionReport;

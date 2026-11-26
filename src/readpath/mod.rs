@@ -6,4 +6,5 @@ pub use inspect::{Inspection, StripeInspection, StripeVerdict};
 pub use range::{PinnedObject, RangeRequest, ReadReport, StripeRead};
 pub use shards::{FaultKind, ShardFault};
 
+pub(crate) use shards::open_fragment_stream;
 pub(crate) use shards::StripeReader;

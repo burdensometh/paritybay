@@ -1,12 +1,11 @@
-use crate::codec::checksum;
-use crate::files;
-use crate::manifest::{sequence, FragmentAddress};
+use crate::manifest::sequence;
 use crate::placement::{replacement, replacement_valid, ReplacementPolicy};
-use crate::readpath::StripeReader;
 use crate::{
     Boundary, Catalog, Cluster, Error, ObjectGeneration, RepairAttempt, RepairKind, RepairState,
     Result, StripeManifest,
 };
+
+use super::stream::{verify_existing_copy, CopyFailure, REPAIR_WINDOW};
 
 pub(super) enum Planning {
     Ready(RepairAttempt),
@@ -97,17 +96,25 @@ impl Cluster {
 
         self.checkpoint(Boundary::BeforeRepairCopy, id.to_string())?;
         if !self.copy_already_present(attempt)? {
-            let mut reader = StripeReader::new(self, &catalog, attempt.generation, stripe);
-            let bytes = match reader.direct(attempt.from.shard) {
-                Some(bytes) => bytes.to_vec(),
-                None => match reader.rebuild(attempt.from.shard) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        return self.finish_repair(id, CopyStatus::BadSources(error.to_string()))
+            let outcome = self.stream_repair_fragment(
+                &catalog,
+                attempt.generation,
+                stripe,
+                attempt.from.shard,
+                &attempt.to,
+                REPAIR_WINDOW,
+            );
+            if let Err(failure) = outcome {
+                match failure {
+                    CopyFailure::Io(error) => return Err(error),
+                    source_failure => {
+                        return self
+                            .finish_repair(id, CopyStatus::BadSources(source_failure.detail()))
                     }
-                },
-            };
-            self.write_fragment(attempt.generation, attempt.stripe, &attempt.to, &bytes)?;
+                }
+            }
+            // Re-read the draft through rolling windows before any catalog
+            // change, so a torn write can never publish a new mapping.
             if !self.copy_already_present(attempt)? {
                 return Err(Error::Corrupt(format!(
                     "repair {id} failed read-back verification before publication"
@@ -118,15 +125,8 @@ impl Cluster {
     }
 
     fn copy_already_present(&self, attempt: &RepairAttempt) -> Result<bool> {
-        let address =
-            FragmentAddress::from_receipt(attempt.generation, attempt.stripe, &attempt.to);
-        let path = self.fragment_path(&address)?;
-        match files::read_limited(&path, attempt.to.bytes as usize) {
-            Ok(bytes) => {
-                Ok(bytes.len() == attempt.to.bytes as usize
-                    && checksum(&bytes) == attempt.to.crc32c)
-            }
-            Err(Error::Corrupt(_)) => Ok(false),
+        match verify_existing_copy(self, attempt, REPAIR_WINDOW) {
+            Ok(verified) => Ok(verified),
             Err(error) if error.is_not_found_io() => Ok(false),
             Err(error) => Err(error),
         }

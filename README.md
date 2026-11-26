@@ -53,7 +53,11 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
 - **Heal** uses the same shard validation as the read path. `inspect KEY`
   shows expected receipts, read faults, domain coverage and per-stripe
   conclusions. `scan [KEY]` summarizes without writing. `heal [KEY]`
-  writes a new fragment revision and verifies it before publishing. The
+  writes a new fragment revision and verifies it before publishing.
+  Inspection and repair stream every fragment through fixed 64 KiB windows
+  with rolling CRC32C, so their live buffer peak is independent of
+  `block_bytes` (no whole shard is ever buffered); a short or zero-length
+  second shard is reconstructed by treating its absent tail as zeros. The
   repair attempt remains in `repair-log`. `replay [ATTEMPT]` can resume a
   planned copy after interruption and reuses an already verified copy when
   available.

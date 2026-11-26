@@ -4,7 +4,9 @@ use crate::manifest::checked_key;
 use crate::placement::DomainHealth;
 use crate::{Catalog, Cluster, Error, ObjectGeneration, Result, StripeManifest};
 
-use super::{ShardFault, StripeReader};
+use super::shards::{
+    streaming_parity_matches, streaming_rebuild_verifies, verify_shard, ShardFault,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StripeVerdict {
@@ -68,25 +70,52 @@ impl Cluster {
         }
     }
 
+    /// Inspect a stripe with fixed-window streaming checks. No whole shard is
+    /// ever buffered, so inspection memory is independent of block size.
     pub(crate) fn inspect_stripe(
         &self,
         catalog: &Catalog,
         generation: u64,
         stripe: &StripeManifest,
     ) -> StripeInspection {
-        let mut reader = StripeReader::new(self, catalog, generation, stripe);
-        reader.verify_all();
-        let faults = reader.faults();
+        let faults: Vec<ShardFault> = stripe
+            .fragments
+            .iter()
+            .filter_map(|receipt| {
+                verify_shard(self, catalog, generation, stripe.index, receipt).err()
+            })
+            .collect();
+
         let (verdict, detail) = match faults.as_slice() {
-            [] if reader.parity_matches() => (StripeVerdict::Healthy, None),
-            [] => (
-                StripeVerdict::ParityMismatch,
-                Some("three checksums passed but the XOR relation failed".into()),
-            ),
-            [fault] => match reader.rebuild(fault.address.shard) {
-                Ok(_) => (StripeVerdict::Recoverable, None),
-                Err(error) => (StripeVerdict::Unrecoverable, Some(error.to_string())),
-            },
+            [] => {
+                if streaming_parity_matches(self, catalog, generation, stripe) {
+                    (StripeVerdict::Healthy, None)
+                } else {
+                    (
+                        StripeVerdict::ParityMismatch,
+                        Some("three checksums passed but the XOR relation failed".into()),
+                    )
+                }
+            }
+            [fault] => {
+                if streaming_rebuild_verifies(
+                    self,
+                    catalog,
+                    generation,
+                    stripe,
+                    fault.address.shard,
+                ) {
+                    (StripeVerdict::Recoverable, None)
+                } else {
+                    (
+                        StripeVerdict::Unrecoverable,
+                        Some(format!(
+                            "cannot reconstruct shard {} from the surviving peers",
+                            fault.address.shard
+                        )),
+                    )
+                }
+            }
             _ => (
                 StripeVerdict::Unrecoverable,
                 Some("fewer than two verified shards".into()),
