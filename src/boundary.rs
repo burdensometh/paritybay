@@ -12,6 +12,7 @@ pub enum Boundary {
     BeforeCatalogCommit,
     ReadPinned,
     BeforeRepairCopy,
+    BeforeTierCopy,
     BeforeNodeRemoval,
 }
 
@@ -22,6 +23,7 @@ impl Boundary {
             Self::BeforeCatalogCommit => "before-catalog-commit",
             Self::ReadPinned => "read-pinned",
             Self::BeforeRepairCopy => "before-repair-copy",
+            Self::BeforeTierCopy => "before-tier-copy",
             Self::BeforeNodeRemoval => "before-node-removal",
         }
     }

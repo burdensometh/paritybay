@@ -1,6 +1,9 @@
 use crate::config::validate_node;
 use crate::manifest::MAX_NODES;
-use crate::{Boundary, Catalog, Cluster, Error, Media, NodeDomain, NodeState, RepairState, Result};
+use crate::{
+    Boundary, Catalog, Cluster, Error, Media, MigrationState, NodeDomain, NodeState, RepairState,
+    Result,
+};
 
 use super::Ledger;
 
@@ -155,6 +158,18 @@ fn ensure_unreferenced(catalog: &Catalog, id: &str) -> Result<()> {
     }) {
         return Err(Error::Conflict(format!(
             "node {id} still has a planned repair"
+        )));
+    }
+    if catalog.migrations.values().any(|migration| {
+        migration.state == MigrationState::Planned
+            && migration
+                .targets
+                .iter()
+                .flatten()
+                .any(|receipt| receipt.node == id)
+    }) {
+        return Err(Error::Conflict(format!(
+            "node {id} still holds a planned migration target"
         )));
     }
     if catalog

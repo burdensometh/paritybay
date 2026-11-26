@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::files;
 use crate::manifest::FragmentAddress;
-use crate::{Catalog, Cluster, Error, NodeState, RepairState, Result};
+use crate::{Catalog, Cluster, Error, MigrationState, NodeState, RepairState, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectionReport {
@@ -177,6 +177,21 @@ fn active_fragments(catalog: &Catalog) -> BTreeSet<FragmentAddress> {
             attempt.stripe,
             &attempt.to,
         ));
+    }
+    for migration in catalog
+        .migrations
+        .values()
+        .filter(|migration| migration.state == MigrationState::Planned)
+    {
+        for (stripe, targets) in migration.targets.iter().enumerate() {
+            for target in targets {
+                active.insert(FragmentAddress::from_receipt(
+                    migration.generation,
+                    stripe as u32,
+                    target,
+                ));
+            }
+        }
     }
     active
 }

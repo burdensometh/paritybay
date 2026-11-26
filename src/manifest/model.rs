@@ -296,6 +296,51 @@ impl fmt::Display for RepairState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationState {
+    Planned,
+    Published,
+    Stale,
+}
+
+impl fmt::Display for MigrationState {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(match self {
+            Self::Planned => "planned",
+            Self::Published => "published",
+            Self::Stale => "stale",
+        })
+    }
+}
+
+/// A full-object move between media classes. Every stripe is copied to the
+/// target media before the catalog switches its mapping in one transaction,
+/// so an interrupted move leaves the original placement readable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationAttempt {
+    pub id: u64,
+    pub key: String,
+    pub generation: u64,
+    pub from_media: Media,
+    pub target_media: Media,
+    pub condition: Condition,
+    /// Target receipts, indexed by stripe then shard. Bytes and CRCs stay
+    /// identical to the source; only the node and revision change.
+    pub targets: Vec<[FragmentReceipt; 3]>,
+    pub state: MigrationState,
+    pub detail: String,
+}
+
+impl MigrationAttempt {
+    pub fn target_address(&self, stripe: u32, shard: u8) -> FragmentAddress {
+        FragmentAddress::from_receipt(
+            self.generation,
+            stripe,
+            &self.targets[stripe as usize][usize::from(shard)],
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepairAttempt {
     pub id: u64,
@@ -318,6 +363,7 @@ pub struct Catalog {
     pub uploads: BTreeMap<u64, UploadSession>,
     pub objects: BTreeMap<String, ObjectGeneration>,
     pub repairs: BTreeMap<u64, RepairAttempt>,
+    pub migrations: BTreeMap<u64, MigrationAttempt>,
     pub retired: Vec<RetiredFragment>,
 }
 
@@ -340,5 +386,13 @@ impl Catalog {
             address: FragmentAddress::from_receipt(generation, stripe, fragment),
             bytes: fragment.bytes,
         });
+    }
+
+    pub(crate) fn retire_migration_targets(&mut self, migration: &MigrationAttempt) {
+        for (stripe, targets) in migration.targets.iter().enumerate() {
+            for target in targets {
+                self.retire_fragment(migration.generation, stripe as u32, target);
+            }
+        }
     }
 }

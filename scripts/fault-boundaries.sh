@@ -11,7 +11,10 @@ gates="$work/gates"
 mkdir -- "$gates"
 pb() { "$bin" --root "$root" "$@"; }
 gated() { "$bin" --root "$root" --gates "$gates" --gate-timeout-ms 15000 "$@"; }
-arm() { : > "$gates/$1.arm"; }
+arm() {
+    rm -f -- "$gates/$1".*.claimed "$gates/$1".*.ready "$gates/$1".*.resume "$gates/$1".*.fail
+    : > "$gates/$1.arm"
+}
 await_gate() {
     local name=$1 deadline=$((SECONDS + 12)) value
     while (( SECONDS < deadline )); do
@@ -100,4 +103,42 @@ pb node-state z-spare online
 : > "$gate.resume"
 expect_conflict "$child"
 pb nodes | grep '^node=z-spare .*state=online'
+
+printf '\n== Interrupt a media migration and replay it ==\n'
+pb put cold "$work/first" --media hot
+pb stat cold | grep 'media=hot'
+arm before-tier-copy
+gated tier cold capacity &
+child=$!
+gate=$(await_gate before-tier-copy)
+cat "$gate.ready"
+# While paused the live object stays on hot media and remains readable.
+pb stat cold | grep 'media=hot'
+pb get cold "$work/paused-cold"
+cmp "$work/first" "$work/paused-cold"
+: > "$gate.fail"
+expect_conflict "$child"
+migration=$(pb tier-log | sed -n 's/^migration=\([0-9]*\) .*/\1/p' | head -1)
+pb tier-log | grep 'state=planned'
+pb tier-replay "$migration" | grep 'state=published'
+pb stat cold | grep 'media=capacity'
+pb get cold "$work/moved"
+cmp "$work/first" "$work/moved"
+
+printf '\n== Cancel a planned return migration ==\n'
+arm before-tier-copy
+gated tier cold hot &
+child=$!
+gate=$(await_gate before-tier-copy)
+cat "$gate.ready"
+return_id=$(pb tier-log | sed -n 's/^migration=\([0-9]*\) .*to=hot.*/\1/p' | head -1)
+# Mark the plan stale while the worker is paused, then release the gate.
+# The worker's post-checkpoint revalidation observes the cancellation and
+# returns without publishing.
+pb tier-cancel "$return_id" | grep 'state=stale'
+: > "$gate.resume"
+wait "$child"
+pb gc >/dev/null
+pb get cold "$work/still-cold"
+cmp "$work/first" "$work/still-cold"
 printf 'fault_boundaries=passed\n'

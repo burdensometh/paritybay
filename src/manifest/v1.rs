@@ -9,8 +9,9 @@ use crate::{Error, Result};
 use super::validate::{map_insert, MAX_NODES, MAX_PARTS, MAX_STRIPES};
 use super::{
     validate_catalog, Catalog, Condition, DomainPolicy, FragmentAddress, FragmentReceipt, Media,
-    NodeDomain, NodeState, ObjectGeneration, PartReceipt, PlacementPlan, RepairAttempt, RepairKind,
-    RepairState, RetiredFragment, StripeManifest, UploadSession,
+    MigrationAttempt, MigrationState, NodeDomain, NodeState, ObjectGeneration, PartReceipt,
+    PlacementPlan, RepairAttempt, RepairKind, RepairState, RetiredFragment, StripeManifest,
+    UploadSession,
 };
 
 pub const MAGIC: [u8; 8] = *b"PBAYV1\r\n";
@@ -43,6 +44,14 @@ pub fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
     out.count(catalog.retired.len())?;
     for entry in &catalog.retired {
         out.retired(entry)?;
+    }
+    // The migration journal is a post-v1 extension: omit the whole table when
+    // empty so catalogs without migrations keep their original byte layout.
+    if !catalog.migrations.is_empty() {
+        out.count(catalog.migrations.len())?;
+        for migration in catalog.migrations.values() {
+            out.migration(migration)?;
+        }
     }
     if out.0.len() > MAX_CATALOG_BYTES {
         return Err(Error::Capacity(format!(
@@ -105,6 +114,23 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
     for _ in 0..input.count(usize::MAX, 27)? {
         retired.push(input.retired()?);
     }
+    // The migration journal was added after v1 shipped; a frame may end here.
+    // A zero-length table is valid even at the end of the buffer, so it is
+    // decoded directly rather than through the element-size count heuristic.
+    let mut migrations = BTreeMap::new();
+    if !input.is_empty() {
+        // Bounded only by the u32 range and MAX_STRIPES; field decoding and
+        // finish() reject truncated or trailing bytes, so no size heuristic is
+        // needed (it would mis-handle zero-stripe or small entries).
+        let count = input.u32()? as usize;
+        if count > MAX_STRIPES {
+            return Err(input.error("migration collection out of range"));
+        }
+        for _ in 0..count {
+            let migration = input.migration()?;
+            map_insert(&mut migrations, migration.id, migration, "migration")?;
+        }
+    }
     input.finish()?;
     let catalog = Catalog {
         block_bytes,
@@ -114,6 +140,7 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
         uploads,
         objects,
         repairs,
+        migrations,
         retired,
     };
     validate_catalog(&catalog)?;
@@ -279,6 +306,27 @@ impl Encoder {
         self.u32(entry.bytes);
         Ok(())
     }
+
+    fn migration(&mut self, migration: &MigrationAttempt) -> Result<()> {
+        self.u64(migration.id);
+        self.string(&migration.key)?;
+        self.u64(migration.generation);
+        self.media(migration.from_media);
+        self.media(migration.target_media);
+        self.condition(migration.condition);
+        self.count(migration.targets.len())?;
+        for targets in &migration.targets {
+            for target in targets {
+                self.fragment(target)?;
+            }
+        }
+        self.u8(match migration.state {
+            MigrationState::Planned => 0,
+            MigrationState::Published => 1,
+            MigrationState::Stale => 2,
+        });
+        self.string(&migration.detail)
+    }
 }
 
 struct Decoder<'a> {
@@ -310,6 +358,10 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
         Err(self.error("trailing bytes"))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rest.is_empty()
     }
 
     fn u8(&mut self) -> Result<u8> {
@@ -511,6 +563,48 @@ impl<'a> Decoder<'a> {
         Ok(RetiredFragment {
             address,
             bytes: self.u32()?,
+        })
+    }
+
+    fn migration(&mut self) -> Result<MigrationAttempt> {
+        let id = self.u64()?;
+        let key = self.string(512)?;
+        let generation = self.u64()?;
+        let from_media = self.media()?;
+        let target_media = self.media()?;
+        let condition = self.condition()?;
+        // Read the stripe count directly: an empty object has zero target
+        // stripes, and the generic size heuristic would reject that.
+        let stripe_count = self.u32()? as usize;
+        if stripe_count > MAX_STRIPES {
+            return Err(self.error("migration stripe count out of range"));
+        }
+        let mut targets = Vec::with_capacity(stripe_count);
+        for _ in 0..stripe_count {
+            let stripe = [
+                self.fragment()?,
+                self.fragment()?,
+                self.fragment()?,
+            ];
+            targets.push(stripe);
+        }
+        let state = match self.u8()? {
+            0 => MigrationState::Planned,
+            1 => MigrationState::Published,
+            2 => MigrationState::Stale,
+            _ => return Err(self.error("unknown migration state")),
+        };
+        let detail = self.string(1024)?;
+        Ok(MigrationAttempt {
+            id,
+            key,
+            generation,
+            from_media,
+            target_media,
+            condition,
+            targets,
+            state,
+            detail,
         })
     }
 }

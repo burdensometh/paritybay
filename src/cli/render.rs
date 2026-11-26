@@ -4,8 +4,11 @@ use std::path::Path;
 
 use paritybay::readpath::{Inspection, ReadReport, ShardFault};
 use paritybay::repair::{CollectionReport, MaintenanceReport, ScanTotals};
+use paritybay::tier::TierReport;
 use paritybay::upload::WriteReceipt;
-use paritybay::{ObjectGeneration, RepairAttempt, Result, UploadSession};
+use paritybay::{
+    MigrationAttempt, ObjectGeneration, RepairAttempt, Result, UploadSession,
+};
 
 pub(super) fn line(out: &mut dyn Write, message: fmt::Arguments<'_>) -> Result<()> {
     writeln!(out, "{message}").map_err(|e| super::io_error("write report", Path::new("-"), e))
@@ -202,6 +205,40 @@ pub(super) fn maintenance(out: &mut dyn Write, report: &MaintenanceReport) -> Re
     }
     if let Some(removed) = &report.collection {
         collection(out, removed)?;
+    }
+    Ok(())
+}
+
+pub(super) fn tier(out: &mut dyn Write, report: &TierReport) -> Result<()> {
+    match &report.attempt {
+        Some(attempt) => {
+            line(out, format_args!("outcome={} ", report.outcome))?;
+            migration(out, attempt)
+        }
+        None => line(out, format_args!("outcome={} attempt=none", report.outcome)),
+    }
+}
+
+pub(super) fn migration(out: &mut dyn Write, item: &MigrationAttempt) -> Result<()> {
+    line(out, format_args!(
+        "migration={} state={} key={:?} generation={} from={} to={} condition={} stripes={} detail={:?}",
+        item.id,
+        item.state,
+        item.key,
+        item.generation,
+        item.from_media,
+        item.target_media,
+        item.condition,
+        item.targets.len(),
+        item.detail,
+    ))?;
+    for (stripe, targets) in item.targets.iter().enumerate() {
+        for target in targets {
+            line(out, format_args!(
+                "  stripe={} shard={} node={} revision={} bytes={} crc32c={:08x}",
+                stripe, target.shard, target.node, target.revision, target.bytes, target.crc32c,
+            ))?;
+        }
     }
     Ok(())
 }

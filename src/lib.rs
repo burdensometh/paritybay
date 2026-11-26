@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod placement;
 pub mod readpath;
 pub mod repair;
+pub mod tier;
 pub mod upload;
 
 mod boundary;
@@ -16,8 +17,9 @@ pub use boundary::{Boundary, Checkpoint, FileGates, NoCheckpoints};
 pub use config::{parse_node, Config};
 pub use error::{Error, Result};
 pub use manifest::{
-    Catalog, Condition, DomainPolicy, FragmentReceipt, Media, NodeDomain, NodeState,
-    ObjectGeneration, RepairAttempt, RepairKind, RepairState, StripeManifest, UploadSession,
+    Catalog, Condition, DomainPolicy, FragmentReceipt, Media, MigrationAttempt, MigrationState,
+    NodeDomain, NodeState, ObjectGeneration, RepairAttempt, RepairKind, RepairState,
+    StripeManifest, UploadSession,
 };
 
 use std::path::{Path, PathBuf};

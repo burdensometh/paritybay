@@ -4,7 +4,7 @@ use std::path::Path;
 
 use paritybay::manifest::v1;
 use paritybay::repair::MaintenanceOutcome;
-use paritybay::{Cluster, Error, RepairState, Result};
+use paritybay::{Cluster, Condition, Error, Media, RepairState, Result};
 
 use super::arguments::Arguments;
 use super::{io_error, render};
@@ -23,6 +23,11 @@ pub(super) fn recognizes(command: &str) -> bool {
             | "replay"
             | "repair-log"
             | "repair-prune"
+            | "tier"
+            | "tier-cancel"
+            | "tier-replay"
+            | "tier-log"
+            | "tier-prune"
             | "gc"
             | "v1-export"
     )
@@ -41,9 +46,9 @@ pub(super) fn run(
                 let node = item.node;
                 let allocations = item.allocation;
                 render::line(out, format_args!(
-                    "node={} domain={} media={} state={} capacity={} free={} current={} uploads={} repairs={} retired={}",
+                    "node={} domain={} media={} state={} capacity={} free={} current={} uploads={} repairs={} migrations={} retired={}",
                     node.id, node.domain, node.media, node.state, node.capacity, item.free, allocations.current,
-                    allocations.uploads, allocations.repairs, allocations.retired,
+                    allocations.uploads, allocations.repairs, allocations.migrations, allocations.retired,
                 ))?;
             }
         }
@@ -133,6 +138,53 @@ pub(super) fn run(
             let through = args.number("terminal attempt upper bound")?;
             args.end()?;
             let removed = cluster.prune_repairs(through)?;
+            render::line(out, format_args!("pruned={removed}"))?;
+        }
+        "tier" => {
+            let key = args.text("key")?;
+            let media: Media = args.text("target media")?.parse()?;
+            let flags = args.switches(&["--if"], &[])?;
+            let condition = flags.value("--if")?.unwrap_or(Condition::Any);
+            let report = cluster.tier_object(&key, media, condition)?;
+            render::tier(out, &report)?;
+            match report.outcome {
+                paritybay::tier::TierOutcome::NoTarget => return Ok(5),
+                paritybay::tier::TierOutcome::Pending => return Ok(4),
+                _ => {}
+            }
+        }
+        "tier-cancel" => {
+            let id = args.number("migration")?;
+            args.end()?;
+            let attempt = cluster.cancel_migration(id)?;
+            render::migration(out, &attempt)?;
+        }
+        "tier-replay" => {
+            let id = args.maybe_number("migration")?;
+            args.end()?;
+            let attempts = match id {
+                Some(id) => vec![cluster.run_migration(id)?],
+                None => cluster.replay_migrations()?,
+            };
+            for attempt in &attempts {
+                render::migration(out, attempt)?;
+            }
+        }
+        "tier-log" => {
+            let id = args.maybe_number("migration")?;
+            args.end()?;
+            let attempts = match id {
+                Some(id) => vec![cluster.migration_attempt(id)?],
+                None => cluster.catalog()?.migrations.into_values().collect(),
+            };
+            for attempt in &attempts {
+                render::migration(out, attempt)?;
+            }
+        }
+        "tier-prune" => {
+            let through = args.number("terminal migration upper bound")?;
+            args.end()?;
+            let removed = cluster.prune_migrations(through)?;
             render::line(out, format_args!("pruned={removed}"))?;
         }
         "gc" => {

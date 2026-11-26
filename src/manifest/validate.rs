@@ -5,8 +5,8 @@ use crate::config::{check_limits, validate_node};
 use crate::{Error, Result};
 
 use super::{
-    Catalog, Condition, DomainPolicy, FragmentAddress, FragmentReceipt, Media, NodeState,
-    ObjectGeneration, RepairAttempt, RepairState, UploadSession,
+    Catalog, Condition, DomainPolicy, FragmentAddress, FragmentReceipt, Media, MigrationState,
+    NodeState, ObjectGeneration, RepairAttempt, RepairState, UploadSession,
 };
 
 pub(crate) const MAX_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
@@ -67,19 +67,27 @@ pub(crate) fn check_condition(
     condition: Condition,
     object: Option<&ObjectGeneration>,
 ) -> Result<()> {
-    let current = object.map(|entry| entry.generation);
-    let matched = match condition {
-        Condition::Any => true,
-        Condition::Absent => current.is_none(),
-        Condition::Generation(expected) => current == Some(expected),
-    };
-    if !matched {
-        return Err(Error::Conflict(format!(
-            "condition {condition} failed for {key:?} with current generation {}",
-            current.map_or_else(|| "none".into(), |id| id.to_string()),
-        )));
+    if condition_matches(condition, object) {
+        return Ok(());
     }
-    Ok(())
+    let current = object.map(|entry| entry.generation);
+    Err(Error::Conflict(format!(
+        "condition {condition} failed for {key:?} with current generation {}",
+        current.map_or_else(|| "none".into(), |id| id.to_string()),
+    )))
+}
+
+/// Snapshot of the condition captured by a planned migration; rechecked when
+/// the move is resumed after a restart.
+pub(crate) fn condition_matches(
+    condition: Condition,
+    object: Option<&ObjectGeneration>,
+) -> bool {
+    match condition {
+        Condition::Any => true,
+        Condition::Absent => object.is_none(),
+        Condition::Generation(expected) => object.is_some_and(|entry| entry.generation == expected),
+    }
 }
 
 fn corrupt(message: impl Into<String>) -> Error {
@@ -302,6 +310,116 @@ fn validate_retired(catalog: &Catalog, referenced: &BTreeSet<FragmentAddress>) -
     Ok(())
 }
 
+fn validate_migration_receipt(
+    catalog: &Catalog,
+    receipt: &FragmentReceipt,
+    expected: &FragmentReceipt,
+) -> Result<()> {
+    if receipt.shard != expected.shard
+        || receipt.bytes != expected.bytes
+        || receipt.crc32c != expected.crc32c
+    {
+        return Err(corrupt("migration target changes shard geometry or checksum"));
+    }
+    if receipt.bytes > catalog.block_bytes
+        || !catalog.nodes.contains_key(&receipt.node)
+    {
+        return Err(corrupt("invalid migration fragment"));
+    }
+    existing_id(catalog, receipt.revision, "migration fragment revision")
+}
+
+fn validate_migrations(catalog: &Catalog, referenced: &mut BTreeSet<FragmentAddress>) -> Result<()> {
+    let mut planned_generations = BTreeSet::new();
+    for (id, migration) in &catalog.migrations {
+        existing_id(catalog, *id, "migration attempt")?;
+        if *id != migration.id
+            || migration.id == 0
+            || migration.from_media == migration.target_media
+            || migration.targets.len() > MAX_STRIPES
+            || migration.detail.len() > 1024
+        {
+            return Err(corrupt("invalid migration journal entry"));
+        }
+        let object = catalog
+            .objects
+            .get(&migration.key)
+            .filter(|object| object.generation == migration.generation);
+        // Only a planned move must still describe the live object: it has not
+        // switched media yet. A published or stale entry is a historical record
+        // whose object may have moved or been repaired again afterwards.
+        if migration.state == MigrationState::Planned {
+            if let Some(object) = object {
+                if migration.from_media != object.media
+                    || !condition_matches(migration.condition, Some(object))
+                    || object.stripes.len() != migration.targets.len()
+                {
+                    return Err(corrupt("migration no longer matches its object"));
+                }
+            }
+        }
+        for (stripe, targets) in migration.targets.iter().enumerate() {
+            for (shard, target) in targets.iter().enumerate() {
+                if usize::from(target.shard) != shard {
+                    return Err(corrupt("migration target shard ordering is wrong"));
+                }
+                if migration.state == MigrationState::Planned {
+                    if let Some(object) = object {
+                        let current = object
+                            .stripes
+                            .get(stripe)
+                            .ok_or_else(|| corrupt("migration target stripe out of range"))?
+                            .fragments
+                            .get(shard)
+                            .ok_or_else(|| corrupt("migration target shard out of range"))?;
+                        validate_migration_receipt(catalog, target, current)?;
+                    } else {
+                        validate_repair_receipt(catalog, target)?;
+                    }
+                } else {
+                    validate_repair_receipt(catalog, target)?;
+                }
+                if migration.state == MigrationState::Planned
+                    && !referenced.insert(FragmentAddress::from_receipt(
+                        migration.generation,
+                        stripe as u32,
+                        target,
+                    ))
+                {
+                    return Err(corrupt("migration target aliases another fragment"));
+                }
+            }
+            // Only planned moves reserve target-media nodes; terminal entries
+            // describe fragments that have been switched away or retired.
+            if migration.state == MigrationState::Planned {
+                if let Some(object) = object {
+                    let nodes = targets.each_ref().map(|receipt| receipt.node.as_str());
+                    layout_valid(
+                        catalog,
+                        nodes,
+                        migration.target_media,
+                        object.domain_policy,
+                    )?;
+                }
+            }
+        }
+        if migration.state == MigrationState::Planned {
+            if !planned_generations.insert(migration.generation) {
+                return Err(corrupt("multiple planned migrations for one object generation"));
+            }
+            if catalog.repairs.values().any(|attempt| {
+                attempt.state == RepairState::Planned
+                    && attempt.generation == migration.generation
+            }) {
+                return Err(corrupt(
+                    "planned migration overlaps a planned repair for the same generation",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_catalog(catalog: &Catalog) -> Result<()> {
     check_limits(catalog.block_bytes, catalog.staging_limit).map_err(|e| corrupt(e.to_string()))?;
     if catalog.next_id == 0 || !(3..=MAX_NODES).contains(&catalog.nodes.len()) {
@@ -356,6 +474,23 @@ pub(crate) fn validate_catalog(catalog: &Catalog) -> Result<()> {
             return Err(corrupt(
                 "repair attempt id collides with another allocation",
             ));
+        }
+    }
+    validate_migrations(catalog, &mut referenced)?;
+    for migration in catalog.migrations.values() {
+        if !ids.insert(migration.id) {
+            return Err(corrupt(
+                "migration id collides with another allocation",
+            ));
+        }
+        for targets in &migration.targets {
+            for target in targets {
+                if !ids.insert(target.revision) {
+                    return Err(corrupt(
+                        "migration fragment revision collides with another allocation",
+                    ));
+                }
+            }
         }
     }
     validate_retired(catalog, &referenced)?;

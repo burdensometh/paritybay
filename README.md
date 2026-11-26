@@ -65,6 +65,19 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   `nodes` to inspect live, reserved and retired allocations. `node-media`
   changes the class of a drained, unreferenced node. Node removal marks the
   catalog entry and leaves the node directory available for inspection.
+- **Tiering** moves a cooled object between media classes with
+  `tier KEY hot|capacity [--if any|absent|GEN]`. The object generation, size,
+  stripe geometry and every shard CRC are preserved; every stripe's current
+  fragments switch to the target media together in one catalog transaction.
+  Target bytes are reserved up front through the same per-node ledger as
+  uploads, so insufficient target capacity fails before the source placement
+  changes and existing upload reservations stay protected. A paused or
+  interrupted move leaves the original media as the live, readable mapping.
+  `tier-replay [ID]` resumes a planned move and reuses any already verified
+  target fragments; `tier-cancel ID` safely abandons one and retires its
+  partial copies for `gc`; `tier-log [ID]` and `tier-prune ID` inspect and
+  prune the journal. A planned move blocks conflicting repairs and the removal
+  of its target nodes.
 
 `paritybay help` lists all commands. Exit codes 2–7 distinguish invalid
 input, missing entries, conflicts or pending repairs, unavailable capacity,
@@ -133,6 +146,7 @@ inject a `Checkpoint` directly.
 | `before-catalog-commit` | Catalog draft synced, before atomic rename |
 | `read-pinned` | Generation captured under a reader pin, before shard I/O |
 | `before-repair-copy` | Repair plan persisted and source mapping read, before copy |
+| `before-tier-copy` | Migration plan persisted, before any stripe is copied |
 | `before-node-removal` | Before writer lock acquisition and removal eligibility checks |
 
 ## Source layout
@@ -145,3 +159,4 @@ inject a `Checkpoint` directly.
 | `src/placement` | Node states, byte accounting, domain-aware placement |
 | `src/readpath` | Pinned reads, range assembly, shard verification |
 | `src/repair` | Scan, replay, node evacuation and retired-file cleanup |
+| `src/tier` | Cross-media object migration journal, copy and switch |

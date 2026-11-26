@@ -28,6 +28,8 @@ Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
   node-size NODE CAPACITY         | node-media NODE hot|capacity
   heal [KEY]      | rebalance [KEY] | replay [ATTEMPT]
   repair-log [ATTEMPT]              | repair-prune THROUGH_ID
+  tier KEY hot|capacity [--if any|absent|GEN]
+  tier-cancel ID  | tier-replay [ID] | tier-log [ID] | tier-prune THROUGH_ID
   gc
   v1-check FILE   | v1-export OUTPUT
   help            | version

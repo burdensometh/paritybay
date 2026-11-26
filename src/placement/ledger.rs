@@ -2,19 +2,20 @@ use std::collections::BTreeMap;
 
 use crate::codec::stripe_lengths;
 use crate::manifest::Catalog;
-use crate::{Error, RepairState, Result};
+use crate::{Error, MigrationState, RepairState, Result};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Allocation {
     pub current: u64,
     pub uploads: u64,
     pub repairs: u64,
+    pub migrations: u64,
     pub retired: u64,
 }
 
 impl Allocation {
     pub fn total(self) -> u64 {
-        self.current + self.uploads + self.repairs + self.retired
+        self.current + self.uploads + self.repairs + self.migrations + self.retired
     }
 }
 
@@ -23,6 +24,7 @@ enum Charge {
     Current,
     Upload,
     Repair,
+    Migration,
     Retired,
 }
 
@@ -69,6 +71,17 @@ impl Ledger {
         {
             ledger.charge(&attempt.to.node, attempt.to.bytes, Charge::Repair)?;
         }
+        for migration in catalog
+            .migrations
+            .values()
+            .filter(|entry| entry.state == MigrationState::Planned)
+        {
+            for targets in &migration.targets {
+                for target in targets {
+                    ledger.charge(&target.node, target.bytes, Charge::Migration)?;
+                }
+            }
+        }
         for entry in &catalog.retired {
             ledger.charge(&entry.address.node, entry.bytes, Charge::Retired)?;
         }
@@ -101,6 +114,7 @@ impl Ledger {
             Charge::Current => &mut allocation.current,
             Charge::Upload => &mut allocation.uploads,
             Charge::Repair => &mut allocation.repairs,
+            Charge::Migration => &mut allocation.migrations,
             Charge::Retired => &mut allocation.retired,
         };
         *counter += bytes;

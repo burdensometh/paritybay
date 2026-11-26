@@ -1,6 +1,6 @@
 use crate::codec::checksum;
 use crate::files;
-use crate::manifest::{sequence, FragmentAddress};
+use crate::manifest::{sequence, FragmentAddress, MigrationState};
 use crate::placement::{replacement, replacement_valid, ReplacementPolicy};
 use crate::readpath::StripeReader;
 use crate::{
@@ -38,6 +38,15 @@ impl Cluster {
         }
         if let Some(pending) = pending_for_stripe(&txn.catalog, current.generation, stripe.index) {
             return Ok(Planning::Busy(pending.id));
+        }
+        if txn.catalog.migrations.values().any(|migration| {
+            migration.state == MigrationState::Planned
+                && migration.generation == current.generation
+        }) {
+            return Err(Error::Conflict(format!(
+                "object {:?} has a planned media migration; finish or cancel it first",
+                current.key
+            )));
         }
         let node = match replacement(&txn.catalog, current, stripe, shard, policy) {
             Ok(node) => node,

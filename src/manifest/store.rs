@@ -55,6 +55,7 @@ impl Cluster {
             uploads: Default::default(),
             objects: Default::default(),
             repairs: Default::default(),
+            migrations: Default::default(),
             retired: Vec::new(),
         };
         self.commit_catalog(&catalog, "initialize")

@@ -27,6 +27,7 @@ truncation and trailing bytes. A complete frame is limited to 64 MiB.
 ```text
 catalog = block_bytes:u32 staging_limit:u64 next_id:u64
           array<node> array<upload> array<object> array<repair> array<retired>
+          [array<migration>]
 
 node = id:str domain:str media:u8 capacity:u64 state:u8
 
@@ -44,7 +45,16 @@ fragment = shard:u8 node:str revision:u64 bytes:u32 crc32c:u32
 repair = id:u64 key:str generation:u64 stripe:u32 from:fragment to:fragment
          kind:u8 state:u8 detail:str
 retired = node:str generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
+
+migration = id:u64 key:str generation:u64 from_media:u8 target_media:u8
+            condition array<migration-stripe> state:u8 detail:str
+migration-stripe = fragment0 fragment1 fragment2
 ```
+
+The trailing `migration` table is a post-v1 extension. A frame without it
+decodes as an empty table, and the canonical writer omits the whole array when
+no migrations exist, so catalogs that never tier remain byte-identical to the
+original layout.
 
 | Field | Tags |
 |---|---|
@@ -54,6 +64,17 @@ retired = node:str generation:u64 stripe:u32 shard:u8 revision:u64 bytes:u32
 | Write condition | 0 any, 1 absent, 2 exact generation |
 | Repair kind | 0 heal, 1 rebalance |
 | Repair state | 0 planned, 1 published, 2 stale, 3 unrecoverable |
+| Migration state | 0 planned, 1 published, 2 stale |
+
+A media migration preserves the object generation, size, stripe geometry and
+every shard byte count and CRC32C; only the node and fragment revision change.
+All target shards of all stripes are copied and verified before the object's
+mapping and media switch in the single catalog replacement, so an interrupted
+move leaves the source placement as the live mapping. A planned migration
+reserves its target bytes in the ledger, and only one planned migration may
+exist per object generation. Its target fragments are protected from cleanup
+until the move is published or cancelled; cancelled or stale targets enter the
+retired table.
 
 A fragment consists of raw bytes in
 `nodes/NODE/fragments/GGGGGGGGGGGGGGGG-SSSSSSSS-H-RRRRRRRRRRRRRRRR.pb`.
