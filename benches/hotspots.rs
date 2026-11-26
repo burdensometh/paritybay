@@ -43,6 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Config {
             block_bytes: block,
             staging_limit: 16 * 1024 * 1024,
+            checksum_algorithm: paritybay::ChecksumAlgorithm::Crc32c,
+            fragment_checksum: paritybay::ChecksumAlgorithm::Crc32c,
+            checksum: paritybay::ChecksumAlgorithm::Crc32c,
+            checksum_kind: paritybay::ChecksumAlgorithm::Crc32c,
+            checksum_type: paritybay::ChecksumAlgorithm::Crc32c,
+            digest_algorithm: paritybay::ChecksumAlgorithm::Crc32c,
+            default_checksum: paritybay::ChecksumAlgorithm::Crc32c,
             nodes,
         },
     )?;

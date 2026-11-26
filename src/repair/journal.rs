@@ -1,4 +1,3 @@
-use crate::codec::checksum;
 use crate::files;
 use crate::manifest::{sequence, FragmentAddress};
 use crate::placement::{replacement, replacement_valid, ReplacementPolicy};
@@ -23,6 +22,7 @@ impl Cluster {
         shard: u8,
         kind: RepairKind,
         policy: ReplacementPolicy,
+        target_digest: Option<crate::codec::Checksum>,
     ) -> Result<Planning> {
         let mut txn = self.transaction()?;
         let Some(current) = txn
@@ -50,6 +50,11 @@ impl Cluster {
         let mut to = from.clone();
         to.node = node;
         to.revision = id;
+        if let Some(digest) = target_digest {
+            // Upgrade the authoritative algorithm while retaining the real
+            // CRC-32C of the unchanged copied bytes.
+            to.set_checksum(digest);
+        }
         let attempt = RepairAttempt {
             id,
             key: object.key.clone(),
@@ -122,10 +127,9 @@ impl Cluster {
             FragmentAddress::from_receipt(attempt.generation, attempt.stripe, &attempt.to);
         let path = self.fragment_path(&address)?;
         match files::read_limited(&path, attempt.to.bytes as usize) {
-            Ok(bytes) => {
-                Ok(bytes.len() == attempt.to.bytes as usize
-                    && checksum(&bytes) == attempt.to.crc32c)
-            }
+            // The repair artifact is verified against the target receipt's
+            // own checksum before the catalog mapping is ever switched.
+            Ok(bytes) => Ok(attempt.to.verify_bytes(&bytes).is_ok()),
             Err(Error::Corrupt(_)) => Ok(false),
             Err(error) if error.is_not_found_io() => Ok(false),
             Err(error) => Err(error),

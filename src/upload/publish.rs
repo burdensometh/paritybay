@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 
-use crate::codec::{stripe_lengths, EncodedStripe, SHARDS};
+use crate::codec::{stripe_lengths, ChecksumAlgorithm, EncodedStripe, SHARDS};
 use crate::files;
 use crate::manifest::{
     Catalog, FragmentAddress, FragmentReceipt, ObjectGeneration, PlacementPlan, StripeManifest,
@@ -19,6 +19,7 @@ impl Cluster {
         placements: &[PlacementPlan],
         input: &mut impl Read,
     ) -> Result<ObjectGeneration> {
+        let algorithm = catalog.checksum_algorithm;
         let mut offset = 0;
         let mut stripes = Vec::with_capacity(placements.len());
         for (index, placement) in placements.iter().enumerate() {
@@ -32,6 +33,7 @@ impl Cluster {
                 lengths,
                 placement,
                 encoded,
+                algorithm,
             )?;
             offset = stripe.end();
             stripes.push(stripe);
@@ -48,6 +50,7 @@ impl Cluster {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_stripe(
         &self,
         generation: u64,
@@ -56,13 +59,21 @@ impl Cluster {
         lengths: [u32; SHARDS],
         plan: &PlacementPlan,
         encoded: EncodedStripe,
+        algorithm: ChecksumAlgorithm,
     ) -> Result<StripeManifest> {
-        let fragments = std::array::from_fn(|shard| FragmentReceipt {
-            shard: shard as u8,
-            node: plan.nodes[shard].clone(),
-            revision: generation,
-            bytes: lengths[shard],
-            crc32c: encoded.checksums[shard],
+        let fragments = std::array::from_fn(|shard| {
+            // The v1 CRC word is always retained; the authoritative digest
+            // follows the catalog's configured algorithm.
+            let crc32c = encoded.checksums[shard];
+            let digest = algorithm.compute(&encoded.shards[shard]);
+            FragmentReceipt::from_digest(
+                shard as u8,
+                plan.nodes[shard].clone(),
+                generation,
+                lengths[shard],
+                crc32c,
+                digest,
+            )
         });
         for (receipt, bytes) in fragments.iter().zip(&encoded.shards) {
             self.write_fragment(generation, index, receipt, bytes)?;

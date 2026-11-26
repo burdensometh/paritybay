@@ -47,10 +47,14 @@ impl Cluster {
             self.initialize_node_dir(&node.id)?;
         }
         files::sync_dir(&self.root)?;
+        let checksum_algorithm = config.resolved_checksum();
         let catalog = Catalog {
             block_bytes: config.block_bytes,
             staging_limit: config.staging_limit,
             next_id: 1,
+            checksum_algorithm,
+            fragment_checksum: checksum_algorithm,
+            checksum: checksum_algorithm,
             nodes,
             uploads: Default::default(),
             objects: Default::default(),
@@ -63,6 +67,50 @@ impl Cluster {
     pub fn catalog(&self) -> Result<Catalog> {
         let _lock = files::lock(&self.existing_catalog_lock()?, LockMode::Shared)?;
         self.load_catalog()
+    }
+
+    /// Algorithm used for fragments written after this call. Existing
+    /// fragments are untouched and keep verifying with their own algorithm.
+    pub fn set_checksum_algorithm(
+        &self,
+        algorithm: crate::codec::ChecksumAlgorithm,
+    ) -> Result<crate::codec::ChecksumAlgorithm> {
+        let mut txn = self.transaction()?;
+        txn.catalog.set_checksum_algorithm(algorithm);
+        txn.commit("checksum-policy")?;
+        Ok(algorithm)
+    }
+
+    /// Persist SHA-256 as the checksum for subsequent writes.
+    pub fn enable_strong_checksums(&self) -> Result<()> {
+        self.set_checksum_algorithm(crate::codec::ChecksumAlgorithm::Sha256)?;
+        Ok(())
+    }
+
+    /// Alias for [`Cluster::enable_strong_checksums`].
+    pub fn enable_sha256(&self) -> Result<()> {
+        self.enable_strong_checksums()
+    }
+
+    /// Current new-write checksum algorithm.
+    pub fn checksum_algorithm(&self) -> Result<crate::codec::ChecksumAlgorithm> {
+        Ok(self.catalog()?.checksum_algorithm)
+    }
+
+    /// Alias for [`Cluster::set_checksum_algorithm`].
+    pub fn set_fragment_checksum(
+        &self,
+        algorithm: crate::codec::ChecksumAlgorithm,
+    ) -> Result<crate::codec::ChecksumAlgorithm> {
+        self.set_checksum_algorithm(algorithm)
+    }
+
+    /// Alias for [`Cluster::set_checksum_algorithm`].
+    pub fn configure_checksum(
+        &self,
+        algorithm: crate::codec::ChecksumAlgorithm,
+    ) -> Result<crate::codec::ChecksumAlgorithm> {
+        self.set_checksum_algorithm(algorithm)
     }
 
     pub fn object(&self, key: &str) -> Result<ObjectGeneration> {

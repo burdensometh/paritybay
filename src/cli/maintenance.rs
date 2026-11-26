@@ -20,6 +20,10 @@ pub(super) fn recognizes(command: &str) -> bool {
             | "scan"
             | "heal"
             | "rebalance"
+            | "checksum-upgrade"
+            | "upgrade-checksums"
+            | "rechecksum"
+            | "checksum-policy"
             | "replay"
             | "repair-log"
             | "repair-prune"
@@ -68,6 +72,19 @@ pub(super) fn run(
                 ),
             };
             render::line_after(out, &id, result)?;
+        }
+        "checksum-policy" => {
+            args.end()?;
+            render::line(
+                out,
+                format_args!("checksum={}", cluster.checksum_algorithm()?),
+            )?;
+        }
+        "checksum-upgrade" | "upgrade-checksums" | "rechecksum" => {
+            let key = args.maybe_text()?;
+            args.end()?;
+            let report = cluster.upgrade_checksums(key.as_deref())?;
+            render::maintenance(out, &report)?;
         }
         "scan" | "heal" | "rebalance" => {
             let key = args.maybe_text()?;

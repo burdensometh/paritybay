@@ -1,5 +1,14 @@
+mod checksum;
 mod crc32c;
+mod sha256;
+
+pub use checksum::{
+    checksum_sha256, compute_checksum, sha256_checksum, strong_checksum, Algorithm, Checksum,
+    ChecksumAlgorithm, ChecksumDigest, ChecksumHasher, ChecksumKind, ChecksumType, Digest,
+    DigestAlgorithm, FragmentChecksum, HashAlgorithm,
+};
 pub use crc32c::{checksum, Crc32c};
+pub use sha256::{sha256, sha256_hex, Sha256};
 
 use std::io::{self, Read};
 

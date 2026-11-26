@@ -1,8 +1,9 @@
 use std::fmt;
 
+use crate::codec::ChecksumAlgorithm;
 use crate::manifest::checked_key;
 use crate::placement::ReplacementPolicy;
-use crate::readpath::{StripeInspection, StripeVerdict};
+use crate::readpath::{StripeInspection, StripeReader, StripeVerdict};
 use crate::{
     Catalog, Cluster, Error, ObjectGeneration, RepairAttempt, RepairKind, RepairState, Result,
 };
@@ -178,7 +179,7 @@ impl Cluster {
             let mut no_target = None;
             let mut advanced = false;
             for (shard, policy) in choices {
-                match self.plan_repair(object, stripe, shard, kind, policy)? {
+                match self.plan_repair(object, stripe, shard, kind, policy, None)? {
                     Planning::Ready(attempt) => {
                         let attempt = self.run_repair(attempt.id)?;
                         advanced = attempt.state == RepairState::Published;
@@ -235,9 +236,176 @@ impl Cluster {
         }
         Ok(())
     }
+
+    /// Rewrite legacy CRC-32C fragments with SHA-256 through the durable
+    /// repair journal. Each target is fully written and read-back verified
+    /// before the catalog mapping switches, so an interrupted run resumes via
+    /// [`Cluster::replay_repairs`] after reopen. Returns the maintenance events
+    /// produced; pass `None` for every object or `Some(KEY)` for one object.
+    pub fn upgrade_checksums(&self, key: Option<&str>) -> Result<MaintenanceReport> {
+        // New writes after the upgrade use the stronger algorithm too.
+        self.enable_strong_checksums()?;
+        let _snapshot_pin = self.pin_fragments()?;
+        let catalog = self.catalog()?;
+        let objects = selected(&catalog, key)?;
+        let mut report = MaintenanceReport {
+            kind: RepairKind::Heal,
+            scan: ScanTotals {
+                objects: objects.len(),
+                ..Default::default()
+            },
+            events: Vec::new(),
+            collection: None,
+        };
+
+        // Each published repair converts exactly one fragment; bound the loop
+        // by the total fragment count plus a small refresh allowance.
+        let fragment_count: usize = catalog
+            .objects
+            .values()
+            .map(|object| object.stripes.iter().map(|s| s.fragments.len()).sum::<usize>())
+            .sum();
+        for _ in 0..=fragment_count + 4 {
+            let catalog = self.catalog()?;
+            let Some((object_key, generation, stripe_index, shard)) =
+                first_legacy_fragment(&catalog, key)?
+            else {
+                break;
+            };
+            let object = catalog
+                .objects
+                .get(&object_key)
+                .expect("legacy fragment key present");
+            let stripe = &object.stripes[stripe_index as usize];
+
+            let mut reader = StripeReader::new(self, &catalog, generation, stripe);
+            let direct = reader.direct(shard).map(<[u8]>::to_vec);
+            let bytes = match direct {
+                Some(bytes) => bytes,
+                None => match reader.rebuild(shard) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        report.events.push(event(
+                            object,
+                            stripe_index,
+                            Some(shard),
+                            MaintenanceOutcome::Unrecoverable,
+                            None,
+                            error.to_string(),
+                        ));
+                        return Ok(report);
+                    }
+                },
+            };
+            let digest = ChecksumAlgorithm::Sha256.compute(&bytes);
+
+            match self.plan_repair(
+                object,
+                stripe,
+                shard,
+                RepairKind::Heal,
+                ReplacementPolicy::Heal,
+                Some(digest),
+            )? {
+                Planning::Ready(attempt) => {
+                    let attempt = self.run_repair(attempt.id)?;
+                    let published = attempt.state == RepairState::Published;
+                    report.events.push(attempt_event(object, &attempt));
+                    if !published {
+                        break;
+                    }
+                }
+                Planning::Busy(id) => {
+                    let attempt = self.run_repair(id)?;
+                    report.events.push(attempt_event(object, &attempt));
+                }
+                Planning::Changed => {
+                    report.events.push(event(
+                        object,
+                        stripe_index,
+                        Some(shard),
+                        MaintenanceOutcome::Changed,
+                        None,
+                        "stripe changed",
+                    ));
+                }
+                Planning::NoTarget(detail) => {
+                    report.events.push(event(
+                        object,
+                        stripe_index,
+                        Some(shard),
+                        MaintenanceOutcome::NoTarget,
+                        None,
+                        detail,
+                    ));
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Alias for [`Cluster::upgrade_checksums`].
+    pub fn upgrade_fragment_checksums(
+        &self,
+        key: Option<&str>,
+    ) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(key)
+    }
+
+    /// Alias for [`Cluster::upgrade_checksums`].
+    pub fn rechecksum(&self, key: Option<&str>) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(key)
+    }
+
+    /// Alias for [`Cluster::upgrade_checksums`].
+    pub fn migrate_checksums(&self, key: Option<&str>) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(key)
+    }
+
+    /// Short alias for [`Cluster::upgrade_checksums`].
+    pub fn upgrade(&self, key: Option<&str>) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(key)
+    }
+
+    /// Noun-first alias for [`Cluster::upgrade_checksums`].
+    pub fn checksum_upgrade(&self, key: Option<&str>) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(key)
+    }
+
+    /// Upgrade every object; convenience wrapper used by the CLI.
+    pub fn upgrade_all_checksums(&self) -> Result<MaintenanceReport> {
+        self.upgrade_checksums(None)
+    }
 }
 
-fn selected<'a>(catalog: &'a Catalog, key: Option<&str>) -> Result<Vec<&'a ObjectGeneration>> {
+/// Locate the next CRC-32C fragment eligible for a strong-checksum upgrade.
+fn first_legacy_fragment(
+    catalog: &Catalog,
+    key: Option<&str>,
+) -> Result<Option<(String, u64, u32, u8)>> {
+    let objects = selected(catalog, key)?;
+    for object in objects {
+        for stripe in &object.stripes {
+            for fragment in &stripe.fragments {
+                if fragment.algorithm == ChecksumAlgorithm::Crc32c {
+                    return Ok(Some((
+                        object.key.clone(),
+                        object.generation,
+                        stripe.index,
+                        fragment.shard,
+                    )));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn selected<'a>(
+    catalog: &'a Catalog,
+    key: Option<&str>,
+) -> Result<Vec<&'a ObjectGeneration>> {
     if let Some(key) = key {
         checked_key(key)?;
         let object = catalog

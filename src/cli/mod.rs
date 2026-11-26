@@ -16,13 +16,14 @@ const HELP: &str = "ParityBay v1
 Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
 
   init CONFIG
-  put KEY INPUT [--size N] [--media hot|capacity] [--domains strict|prefer] [--if any|absent|GEN]
-  begin KEY SIZE [--media hot|capacity] [--domains strict|prefer] [--if any|absent|GEN]
+  put KEY INPUT [--size N] [--media hot|capacity] [--domains strict|prefer] [--if any|absent|GEN] [--checksum crc32c|sha256]
+  begin KEY SIZE [--media hot|capacity] [--domains strict|prefer] [--if any|absent|GEN] [--checksum crc32c|sha256]
   part UPLOAD PART INPUT [--size N]
   upload UPLOAD   | replan UPLOAD | finish UPLOAD | abort UPLOAD
   get KEY OUTPUT [--range START:END|START:|:SIZE] [--report]
   stat KEY        | list          | delete KEY [--if any|GEN]
   inspect KEY     | scan [KEY]    | fragment-path KEY STRIPE SHARD
+  checksum-policy | checksum-upgrade [KEY]
   nodes           | node-add 'ID,DOMAIN,MEDIA,CAPACITY,STATE'
   node-state NODE online|offline|draining|removed
   node-size NODE CAPACITY         | node-media NODE hot|capacity

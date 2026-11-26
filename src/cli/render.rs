@@ -102,11 +102,12 @@ pub(super) fn inspection(out: &mut dyn Write, inspection: &Inspection) -> Result
             line(
                 out,
                 format_args!(
-                    "  shard={} node={} revision={} bytes={} crc32c={:08x}",
+                    "  shard={} node={} revision={} bytes={} algo={} crc32c={:08x}",
                     fragment.shard,
                     fragment.node,
                     fragment.revision,
                     fragment.bytes,
+                    fragment.algorithm,
                     fragment.crc32c,
                 ),
             )?;

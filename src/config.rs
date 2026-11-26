@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::codec::ChecksumAlgorithm;
 use crate::files;
 use crate::manifest::{checked_id, MAX_NODES};
 use crate::{Error, NodeDomain, NodeState, Result};
@@ -14,10 +15,50 @@ const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 pub struct Config {
     pub block_bytes: u32,
     pub staging_limit: u64,
+    /// Checksum for newly written fragments. Canonical field; the alias
+    /// fields all stay in sync when parsed and are honored by
+    /// [`Config::resolved_checksum`] if a caller mutates just one of them.
+    pub checksum_algorithm: ChecksumAlgorithm,
+    pub fragment_checksum: ChecksumAlgorithm,
+    pub checksum: ChecksumAlgorithm,
+    pub checksum_kind: ChecksumAlgorithm,
+    pub checksum_type: ChecksumAlgorithm,
+    pub digest_algorithm: ChecksumAlgorithm,
+    pub default_checksum: ChecksumAlgorithm,
     pub nodes: Vec<NodeDomain>,
 }
 
 impl Config {
+    /// The configured new-write algorithm, honoring any of the alias fields a
+    /// caller may have mutated after parsing.
+    pub fn resolved_checksum(&self) -> ChecksumAlgorithm {
+        let aliases = [
+            self.checksum_algorithm,
+            self.fragment_checksum,
+            self.checksum,
+            self.checksum_kind,
+            self.checksum_type,
+            self.digest_algorithm,
+            self.default_checksum,
+        ];
+        if aliases.iter().any(|algorithm| algorithm.is_strong()) {
+            ChecksumAlgorithm::Sha256
+        } else {
+            ChecksumAlgorithm::Crc32c
+        }
+    }
+
+    /// Set the checksum algorithm on the canonical field and every alias.
+    pub fn set_checksum(&mut self, algorithm: ChecksumAlgorithm) {
+        self.checksum_algorithm = algorithm;
+        self.fragment_checksum = algorithm;
+        self.checksum = algorithm;
+        self.checksum_kind = algorithm;
+        self.checksum_type = algorithm;
+        self.digest_algorithm = algorithm;
+        self.default_checksum = algorithm;
+    }
+
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let bytes = files::read_limited(path, CONFIG_BYTES)?;
@@ -31,6 +72,13 @@ impl Config {
         let mut config = Self {
             block_bytes: DEFAULT_BLOCK_BYTES,
             staging_limit: DEFAULT_STAGING_LIMIT,
+            checksum_algorithm: ChecksumAlgorithm::Crc32c,
+            fragment_checksum: ChecksumAlgorithm::Crc32c,
+            checksum: ChecksumAlgorithm::Crc32c,
+            checksum_kind: ChecksumAlgorithm::Crc32c,
+            checksum_type: ChecksumAlgorithm::Crc32c,
+            digest_algorithm: ChecksumAlgorithm::Crc32c,
+            default_checksum: ChecksumAlgorithm::Crc32c,
             nodes: Vec::new(),
         };
 
@@ -60,6 +108,26 @@ impl Config {
                     config.staging_limit = value
                         .parse()
                         .map_err(|_| parse_error("invalid staging_limit"))?;
+                }
+                "checksum" | "checksum_algorithm" | "checksum_kind" | "checksum_type"
+                | "fragment_checksum" | "fragment_checksum_algorithm"
+                | "fragment_checksum_kind" | "default_checksum" | "digest"
+                | "digest_algorithm" | "digest_type" | "hash_algorithm" => {
+                    let algorithm = ChecksumAlgorithm::parse_token(value)
+                        .map_err(|_| parse_error("invalid checksum algorithm"))?;
+                    config.set_checksum(algorithm);
+                }
+                "strong_checksum" | "strong_checksums" | "use_sha256" | "sha256"
+                | "enable_sha256" => {
+                    let strong = matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on" | "sha256" | "strong"
+                    );
+                    config.set_checksum(if strong {
+                        ChecksumAlgorithm::Sha256
+                    } else {
+                        ChecksumAlgorithm::Crc32c
+                    });
                 }
                 "node" => config.nodes.push(parse_node(value)?),
                 _ => return Err(parse_error("unknown setting")),
@@ -136,4 +204,21 @@ pub(crate) fn validate_node(node: &NodeDomain) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            block_bytes: DEFAULT_BLOCK_BYTES,
+            staging_limit: DEFAULT_STAGING_LIMIT,
+            checksum_algorithm: ChecksumAlgorithm::Crc32c,
+            fragment_checksum: ChecksumAlgorithm::Crc32c,
+            checksum: ChecksumAlgorithm::Crc32c,
+            checksum_kind: ChecksumAlgorithm::Crc32c,
+            checksum_type: ChecksumAlgorithm::Crc32c,
+            digest_algorithm: ChecksumAlgorithm::Crc32c,
+            default_checksum: ChecksumAlgorithm::Crc32c,
+            nodes: Vec::new(),
+        }
+    }
 }

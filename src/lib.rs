@@ -7,12 +7,20 @@ pub mod readpath;
 pub mod repair;
 pub mod upload;
 
+/// Naming alias for callers that refer to the codec as the checksum module.
+pub use codec as checksum;
+
 mod boundary;
 mod config;
 mod error;
 mod files;
 
 pub use boundary::{Boundary, Checkpoint, FileGates, NoCheckpoints};
+pub use codec::{
+    checksum_sha256, compute_checksum, sha256, sha256_checksum, sha256_hex, strong_checksum,
+    Algorithm, Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHasher, ChecksumKind,
+    ChecksumType, Digest, DigestAlgorithm, FragmentChecksum, HashAlgorithm, Sha256,
+};
 pub use config::{parse_node, Config};
 pub use error::{Error, Result};
 pub use manifest::{

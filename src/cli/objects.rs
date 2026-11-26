@@ -40,7 +40,11 @@ pub(super) fn run(
         "put" => {
             let key = args.text("key")?;
             let path = args.path("input")?;
-            let flags = args.switches(&["--size", "--media", "--domains", "--if"], &[])?;
+            let flags = args.switches(
+                &["--size", "--media", "--domains", "--if", "--checksum"],
+                &[],
+            )?;
+            apply_checksum_flag(cluster, &flags)?;
             let (mut input, size) = input(&path, flags.value("--size")?)?;
             let receipt = cluster.put(&key, upload_options(size, &flags)?, &mut input)?;
             render::write_receipt(out, &receipt)?;
@@ -48,7 +52,9 @@ pub(super) fn run(
         "begin" => {
             let key = args.text("key")?;
             let size = args.number("size")?;
-            let flags = args.switches(&["--media", "--domains", "--if"], &[])?;
+            let flags =
+                args.switches(&["--media", "--domains", "--if", "--checksum"], &[])?;
+            apply_checksum_flag(cluster, &flags)?;
             let session = cluster.begin_upload(&key, upload_options(size, &flags)?)?;
             render::upload(out, &session)?;
         }
@@ -184,4 +190,11 @@ fn upload_options(bytes: u64, flags: &Switches) -> Result<UploadOptions> {
         domains: flags.value("--domains")?.unwrap_or(DomainPolicy::Strict),
         condition: flags.value("--if")?.unwrap_or(Condition::Any),
     })
+}
+
+fn apply_checksum_flag(cluster: &Cluster, flags: &Switches) -> Result<()> {
+    if let Some(algorithm) = flags.value::<paritybay::ChecksumAlgorithm>("--checksum")? {
+        cluster.set_checksum_algorithm(algorithm)?;
+    }
+    Ok(())
 }

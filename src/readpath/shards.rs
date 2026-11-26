@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::codec::{checksum, reconstruct, SHARDS};
+use crate::codec::{reconstruct, SHARDS};
 use crate::files;
 use crate::manifest::{FragmentAddress, FragmentReceipt};
 use crate::{Catalog, Cluster, Error, Result, StripeManifest};
@@ -115,10 +115,12 @@ impl<'a> StripeReader<'a> {
             )));
         }
         let rebuilt = reconstruct(self.stripe.lengths(), shard, sources)?;
-        if checksum(&rebuilt) != self.stripe.fragments[index].crc32c {
-            return Err(
-                self.unrecoverable(format!("reconstructed checksum differs for shard {shard}"))
-            );
+        if !self.stripe.fragments[index].verify(&rebuilt) {
+            let receipt = &self.stripe.fragments[index];
+            return Err(self.unrecoverable(format!(
+                "reconstructed {} differs for shard {shard}",
+                receipt.algorithm
+            )));
         }
         Ok(rebuilt)
     }
@@ -203,12 +205,8 @@ fn read_shard(
             format!("expected {}, read {}", receipt.bytes, bytes.len()),
         ));
     }
-    let seen = checksum(&bytes);
-    if seen != receipt.crc32c {
-        return Err(fault(
-            FaultKind::InvalidChecksum,
-            format!("expected {:08x}, read {seen:08x}", receipt.crc32c),
-        ));
+    if let Err(expected) = receipt.verify_bytes(&bytes) {
+        return Err(fault(FaultKind::InvalidChecksum, expected));
     }
     Ok(bytes)
 }

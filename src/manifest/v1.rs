@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use crate::codec::checksum;
+pub use crate::codec::{Checksum, ChecksumAlgorithm};
 use crate::{Error, Result};
 
 use super::validate::{map_insert, MAX_NODES, MAX_PARTS, MAX_STRIPES};
@@ -16,6 +17,15 @@ use super::{
 pub const MAGIC: [u8; 8] = *b"PBAYV1\r\n";
 pub const HEADER_BYTES: usize = 16;
 pub const MAX_CATALOG_BYTES: usize = 64 * 1024 * 1024;
+
+/// Marker opening the optional algorithm-agile extension section appended
+/// after the legacy `retired` table. Absent in every original v1 payload, so
+/// pure CRC-32C catalogs encode byte-for-byte as the frozen format.
+const EXT_MAGIC: [u8; 4] = *b"PBX1";
+const POLICY_CRC32C: u8 = 0;
+const POLICY_SHA256: u8 = 1;
+const DIGEST_CRC32C: u8 = 0;
+const DIGEST_SHA256: u8 = 1;
 
 pub fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
     validate_catalog(catalog)?;
@@ -44,6 +54,7 @@ pub fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
     for entry in &catalog.retired {
         out.retired(entry)?;
     }
+    encode_extension(&mut out, catalog)?;
     if out.0.len() > MAX_CATALOG_BYTES {
         return Err(Error::Capacity(format!(
             "v1 catalog exceeds {MAX_CATALOG_BYTES} bytes"
@@ -105,17 +116,22 @@ pub fn decode(bytes: &[u8]) -> Result<Catalog> {
     for _ in 0..input.count(usize::MAX, 27)? {
         retired.push(input.retired()?);
     }
+    let (policy, digests) = decode_extension(&mut input)?;
     input.finish()?;
-    let catalog = Catalog {
+    let mut catalog = Catalog {
         block_bytes,
         staging_limit,
         next_id,
+        checksum_algorithm: policy,
+        fragment_checksum: policy,
+        checksum: policy,
         nodes,
         uploads,
         objects,
         repairs,
         retired,
     };
+    apply_digests(&mut catalog, &digests)?;
     validate_catalog(&catalog)?;
     Ok(catalog)
 }
@@ -394,13 +410,16 @@ impl<'a> Decoder<'a> {
     }
 
     fn fragment(&mut self) -> Result<FragmentReceipt> {
-        Ok(FragmentReceipt {
-            shard: self.u8()?,
-            node: self.string(48)?,
-            revision: self.u64()?,
-            bytes: self.u32()?,
-            crc32c: self.u32()?,
-        })
+        let shard = self.u8()?;
+        let node = self.string(48)?;
+        let revision = self.u64()?;
+        let bytes = self.u32()?;
+        let crc32c = self.u32()?;
+        // Default to the legacy CRC-32C interpretation; any strong digest is
+        // patched on from the optional extension after decoding.
+        Ok(FragmentReceipt::crc32c(
+            shard, node, revision, bytes, crc32c,
+        ))
     }
 
     fn stripe(&mut self) -> Result<StripeManifest> {
@@ -513,4 +532,144 @@ impl<'a> Decoder<'a> {
             bytes: self.u32()?,
         })
     }
+}
+
+impl Decoder<'_> {
+    fn at_end(&self) -> bool {
+        self.rest.is_empty()
+    }
+}
+
+/// Collect every non-CRC digest keyed by its fragment address. De-duplicated
+/// because a live fragment can also be referenced by its repair journal entry.
+fn collect_digests(catalog: &Catalog) -> BTreeMap<FragmentAddress, Checksum> {
+    let mut digests = BTreeMap::new();
+    let mut record = |generation: u64, stripe: u32, receipt: &FragmentReceipt| {
+        if receipt.algorithm != ChecksumAlgorithm::Crc32c {
+            digests.insert(
+                FragmentAddress::from_receipt(generation, stripe, receipt),
+                receipt.checksum.clone(),
+            );
+        }
+    };
+    for object in catalog.objects.values() {
+        for stripe in &object.stripes {
+            for fragment in &stripe.fragments {
+                record(object.generation, stripe.index, fragment);
+            }
+        }
+    }
+    for repair in catalog.repairs.values() {
+        record(repair.generation, repair.stripe, &repair.from);
+        record(repair.generation, repair.stripe, &repair.to);
+    }
+    digests
+}
+
+fn encode_extension(out: &mut Encoder, catalog: &Catalog) -> Result<()> {
+    let digests = collect_digests(catalog);
+    if catalog.checksum_algorithm == ChecksumAlgorithm::Crc32c && digests.is_empty() {
+        // A pure v1 catalog stays byte-identical to the frozen writer.
+        return Ok(());
+    }
+    out.0.extend_from_slice(&EXT_MAGIC);
+    out.u8(match catalog.checksum_algorithm {
+        ChecksumAlgorithm::Crc32c => POLICY_CRC32C,
+        ChecksumAlgorithm::Sha256 => POLICY_SHA256,
+    });
+    out.count(digests.len())?;
+    for (address, digest) in &digests {
+        out.string(&address.node)?;
+        out.u64(address.generation);
+        out.u32(address.stripe);
+        out.u8(address.shard);
+        out.u64(address.revision);
+        match digest {
+            Checksum::Crc32c(value) => {
+                out.u8(DIGEST_CRC32C);
+                out.u32(*value);
+            }
+            Checksum::Sha256(value) => {
+                out.u8(DIGEST_SHA256);
+                out.0.extend_from_slice(value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_extension(
+    input: &mut Decoder,
+) -> Result<(ChecksumAlgorithm, BTreeMap<FragmentAddress, Checksum>)> {
+    if input.at_end() {
+        return Ok((ChecksumAlgorithm::Crc32c, BTreeMap::new()));
+    }
+    if input.take(EXT_MAGIC.len())? != EXT_MAGIC {
+        return Err(input.error("unknown catalog extension marker"));
+    }
+    let policy = match input.u8()? {
+        POLICY_CRC32C => ChecksumAlgorithm::Crc32c,
+        POLICY_SHA256 => ChecksumAlgorithm::Sha256,
+        _ => return Err(input.error("unknown checksum policy")),
+    };
+    let count = input.count(usize::MAX, 34)?;
+    let mut digests = BTreeMap::new();
+    for _ in 0..count {
+        let node = input.string(48)?;
+        let generation = input.u64()?;
+        let stripe = input.u32()?;
+        let shard = input.u8()?;
+        let revision = input.u64()?;
+        let digest = match input.u8()? {
+            DIGEST_CRC32C => Checksum::Crc32c(input.u32()?),
+            DIGEST_SHA256 => {
+                Checksum::Sha256(input.take(32)?.try_into().map_err(|_| {
+                    input.error("short sha256 digest")
+                })?)
+            }
+            _ => return Err(input.error("unknown fragment checksum algorithm")),
+        };
+        let address = FragmentAddress {
+            node,
+            generation,
+            stripe,
+            shard,
+            revision,
+        };
+        map_insert(&mut digests, address, digest, "checksum extension")?;
+    }
+    Ok((policy, digests))
+}
+
+fn apply_digests(
+    catalog: &mut Catalog,
+    digests: &BTreeMap<FragmentAddress, Checksum>,
+) -> Result<()> {
+    let mut used = std::collections::BTreeSet::new();
+    let mut apply = |generation: u64, stripe: u32, receipt: &mut FragmentReceipt| {
+        let address = FragmentAddress::from_receipt(generation, stripe, receipt);
+        if let Some(digest) = digests.get(&address) {
+            receipt.set_checksum(digest.clone());
+            used.insert(address);
+        }
+    };
+    for object in catalog.objects.values_mut() {
+        for stripe in &mut object.stripes {
+            for fragment in &mut stripe.fragments {
+                apply(object.generation, stripe.index, fragment);
+            }
+        }
+    }
+    for repair in catalog.repairs.values_mut() {
+        for receipt in [&mut repair.from, &mut repair.to] {
+            apply(repair.generation, repair.stripe, receipt);
+        }
+    }
+    if let Some(orphan) = digests.keys().find(|address| !used.contains(address)) {
+        return Err(Error::Corrupt(format!(
+            "checksum extension does not match a receipt: {}",
+            orphan.file_name()
+        )));
+    }
+    Ok(())
 }

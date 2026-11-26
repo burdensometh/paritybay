@@ -15,6 +15,17 @@ pub struct UploadOptions {
     pub condition: Condition,
 }
 
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            bytes: 0,
+            media: Media::Hot,
+            domains: DomainPolicy::Strict,
+            condition: Condition::Any,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteReceipt {
     pub key: String,

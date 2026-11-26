@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::codec::stripe_lengths;
+use crate::codec::{stripe_lengths, Checksum, ChecksumAlgorithm};
 use crate::config::{check_limits, validate_node};
 use crate::{Error, Result};
 
@@ -150,6 +150,7 @@ fn validate_object(catalog: &Catalog, object: &ObjectGeneration) -> Result<()> {
                     "invalid fragment geometry at stripe {index}, shard {shard}"
                 )));
             }
+            validate_receipt_checksum(fragment)?;
             existing_id(catalog, fragment.revision, "fragment revision")?;
             if fragment.revision < object.generation {
                 return Err(corrupt("fragment revision precedes object generation"));
@@ -199,6 +200,35 @@ fn validate_upload(catalog: &Catalog, upload: &UploadSession) -> Result<()> {
     Ok(())
 }
 
+fn validate_receipt_checksum(receipt: &FragmentReceipt) -> Result<()> {
+    let algorithm = receipt.checksum.algorithm();
+    if receipt.algorithm != algorithm
+        || receipt.checksum_algorithm != algorithm
+        || receipt.kind != algorithm
+    {
+        return Err(corrupt("fragment checksum algorithm tags disagree"));
+    }
+    match &receipt.checksum {
+        Checksum::Crc32c(value) => {
+            if receipt.sha256.is_some() || *value != receipt.crc32c {
+                return Err(corrupt("inconsistent crc32c fragment checksum"));
+            }
+        }
+        Checksum::Sha256(value) => {
+            if receipt.algorithm != ChecksumAlgorithm::Sha256
+                || receipt.sha256 != Some(*value)
+                || receipt.digest != receipt.checksum
+            {
+                return Err(corrupt("inconsistent sha256 fragment checksum"));
+            }
+        }
+    }
+    if receipt.digest.algorithm() != algorithm {
+        return Err(corrupt("fragment digest alias disagrees"));
+    }
+    Ok(())
+}
+
 fn validate_repair_receipt(catalog: &Catalog, receipt: &FragmentReceipt) -> Result<()> {
     if receipt.shard > 2
         || receipt.bytes > catalog.block_bytes
@@ -206,6 +236,7 @@ fn validate_repair_receipt(catalog: &Catalog, receipt: &FragmentReceipt) -> Resu
     {
         return Err(corrupt("invalid repair fragment"));
     }
+    validate_receipt_checksum(receipt)?;
     existing_id(catalog, receipt.revision, "repair fragment revision")
 }
 
