@@ -49,11 +49,20 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   intersecting block, the reader verifies the selected whole shard against
   its CRC32C, then emits only the requested bytes. A missing, too short, too
   long, unavailable or CRC-invalid shard triggers reconstruction if the
-  other two shards and the resulting checksum verify.
+  other two shards and the resulting checksum verify. When reconstruction
+  confirms a missing or invalid fragment, the read files a durable heal
+  todo — one per stripe, shared by concurrent readers of the same
+  generation — that `repair-log` lists and `heal` or `replay` executes. A
+  todo whose object generation or fragment revision has moved on goes
+  stale without rewriting. Fragments on unreadable nodes are reported as
+  temporarily inaccessible instead, and a todo that fails to persist
+  never fails the read.
 - **Heal** uses the same shard validation as the read path. `inspect KEY`
   shows expected receipts, read faults, domain coverage and per-stripe
   conclusions. `scan [KEY]` summarizes without writing. `heal [KEY]`
-  writes a new fragment revision and verifies it before publishing. The
+  writes a new fragment revision and verifies it before publishing,
+  running any repair todo a degraded read already queued for the stripe.
+  The
   repair attempt remains in `repair-log`. `replay [ATTEMPT]` can resume a
   planned copy after interruption and reuses an already verified copy when
   available.

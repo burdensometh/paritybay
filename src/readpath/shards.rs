@@ -26,6 +26,18 @@ impl fmt::Display for FaultKind {
     }
 }
 
+impl FaultKind {
+    /// Confirmed fragment damage: the file is gone or fails validation, so a
+    /// degraded read files a repair todo. Anything else may be transient and
+    /// is only reported as temporarily inaccessible.
+    pub(crate) fn confirmed_damage(self) -> bool {
+        matches!(
+            self,
+            Self::Missing | Self::InvalidLength | Self::InvalidChecksum
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShardFault {
     pub address: FragmentAddress,

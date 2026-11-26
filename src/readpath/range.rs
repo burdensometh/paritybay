@@ -69,12 +69,27 @@ pub struct StripeRead {
     pub faults: Vec<ShardFault>,
 }
 
+/// A durable repair todo for a fragment a degraded read reconstructed.
+/// `attempt` is the catalog repair ID that `replay` or `heal` executes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairTodo {
+    pub attempt: u64,
+    pub stripe: u32,
+    pub shard: u8,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadReport {
     pub key: String,
     pub generation: u64,
     pub range: Range<u64>,
     pub stripes: Vec<StripeRead>,
+    /// Repair todos for confirmed fragment damage, deduplicated per stripe
+    /// across concurrent readers of the same generation.
+    pub repairs: Vec<RepairTodo>,
+    /// Faults with no todo filed because the node may only be temporarily
+    /// inaccessible.
+    pub inaccessible: Vec<ShardFault>,
 }
 
 pub struct PinnedObject {
@@ -141,6 +156,8 @@ impl PinnedObject {
             generation: self.object.generation,
             range: range.clone(),
             stripes: Vec::new(),
+            repairs: Vec::new(),
+            inaccessible: Vec::new(),
         };
         if range.is_empty() {
             return Ok(report);
@@ -174,12 +191,33 @@ impl PinnedObject {
                 }
                 offset = end;
             }
+            let faults = reader.faults();
+            for fault in &faults {
+                if fault.kind.confirmed_damage() {
+                    // Best effort: a todo that fails to persist never fails
+                    // the read, and concurrent readers share one plan.
+                    let attempt = self
+                        .cluster
+                        .queue_repair_todo(&self.object, stripe, fault.address.shard)
+                        .ok()
+                        .flatten();
+                    if let Some(attempt) = attempt {
+                        report.repairs.push(RepairTodo {
+                            attempt,
+                            stripe: stripe.index,
+                            shard: fault.address.shard,
+                        });
+                    }
+                } else {
+                    report.inaccessible.push(fault.clone());
+                }
+            }
             report.stripes.push(StripeRead {
                 stripe: stripe.index,
                 bytes_emitted: emitted,
                 bytes_verified: reader.verified_bytes(),
                 reconstructed,
-                faults: reader.faults(),
+                faults,
             });
         }
         Ok(report)

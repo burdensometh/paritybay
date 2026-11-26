@@ -152,6 +152,28 @@ pub(super) fn read_report(out: &mut dyn Write, report: &ReadReport) -> Result<()
             fault_line(out, fault)?;
         }
     }
+    for todo in &report.repairs {
+        line(
+            out,
+            format_args!(
+                "todo={} stripe={} shard={}",
+                todo.attempt, todo.stripe, todo.shard,
+            ),
+        )?;
+    }
+    for fault in &report.inaccessible {
+        line(
+            out,
+            format_args!(
+                "inaccessible={} stripe={} shard={} node={} detail={:?}",
+                fault.kind,
+                fault.address.stripe,
+                fault.address.shard,
+                fault.address.node,
+                fault.detail,
+            ),
+        )?;
+    }
     Ok(())
 }
 

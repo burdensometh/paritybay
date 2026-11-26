@@ -197,15 +197,12 @@ impl Cluster {
                         return Ok(());
                     }
                     Planning::Busy(id) => {
-                        report.events.push(event(
-                            object,
-                            index,
-                            Some(shard),
-                            MaintenanceOutcome::Pending,
-                            Some(id),
-                            "replay the existing plan",
-                        ));
-                        return Ok(());
+                        // A degraded read or an interrupted run already queued
+                        // this plan; execute it instead of planning another.
+                        let attempt = self.run_repair(id)?;
+                        advanced = attempt.state == RepairState::Published;
+                        report.events.push(attempt_event(object, &attempt));
+                        break;
                     }
                     Planning::NoTarget(detail)
                         if !matches!(policy, ReplacementPolicy::ImproveDomains) =>

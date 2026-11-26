@@ -66,6 +66,23 @@ impl Cluster {
         Ok(Planning::Ready(attempt))
     }
 
+    /// Files a heal plan for confirmed fragment damage observed by a degraded
+    /// read. Returns the durable attempt, either newly planned or already
+    /// pending for the stripe. `None` when the object changed underneath the
+    /// reader or no replacement node is currently available.
+    pub(crate) fn queue_repair_todo(
+        &self,
+        object: &ObjectGeneration,
+        stripe: &StripeManifest,
+        shard: u8,
+    ) -> Result<Option<u64>> {
+        match self.plan_repair(object, stripe, shard, RepairKind::Heal, ReplacementPolicy::Heal)? {
+            Planning::Ready(attempt) => Ok(Some(attempt.id)),
+            Planning::Busy(id) => Ok(Some(id)),
+            Planning::Changed | Planning::NoTarget(_) => Ok(None),
+        }
+    }
+
     pub fn replay_repairs(&self) -> Result<Vec<RepairAttempt>> {
         let catalog = self.catalog()?;
         let ids: Vec<_> = catalog
