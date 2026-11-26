@@ -28,7 +28,7 @@ Usage: paritybay [--root DIR] [--gates DIR] [--gate-timeout-ms N] COMMAND
   node-size NODE CAPACITY         | node-media NODE hot|capacity
   heal [KEY]      | rebalance [KEY] | replay [ATTEMPT]
   repair-log [ATTEMPT]              | repair-prune THROUGH_ID
-  gc
+  gc             | compact-staging
   v1-check FILE   | v1-export OUTPUT
   help            | version
 

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use paritybay::readpath::{Inspection, ReadReport, ShardFault};
 use paritybay::repair::{CollectionReport, MaintenanceReport, ScanTotals};
+use paritybay::staging::CompactionReport;
 use paritybay::upload::WriteReceipt;
 use paritybay::{ObjectGeneration, RepairAttempt, Result, UploadSession};
 
@@ -187,6 +188,16 @@ pub(super) fn collection(out: &mut dyn Write, report: &CollectionReport) -> Resu
             report.fragment_files,
             report.staging_files,
             report.temporary_files,
+        ),
+    )
+}
+
+pub(super) fn compaction(out: &mut dyn Write, report: &CompactionReport) -> Result<()> {
+    line(
+        out,
+        format_args!(
+            "uploads={} parts_packed={} loose_removed={} packs_written={}",
+            report.uploads, report.parts_packed, report.loose_removed, report.packs_written,
         ),
     )
 }

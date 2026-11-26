@@ -118,6 +118,9 @@ impl Cluster {
     }
 
     pub fn complete_upload(&self, id: u64) -> Result<WriteReceipt> {
+        // Hold the cleanup pin for the whole assembly so a concurrent gc cannot
+        // unlink a loose part or pack while the object is being published.
+        let _pin = self.pin_fragments()?;
         let mut txn = self.transaction()?;
         let upload = txn
             .catalog

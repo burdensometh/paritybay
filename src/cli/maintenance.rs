@@ -24,6 +24,7 @@ pub(super) fn recognizes(command: &str) -> bool {
             | "repair-log"
             | "repair-prune"
             | "gc"
+            | "compact-staging"
             | "v1-export"
     )
 }
@@ -138,6 +139,10 @@ pub(super) fn run(
         "gc" => {
             args.end()?;
             render::collection(out, &cluster.collect()?)?;
+        }
+        "compact-staging" => {
+            args.end()?;
+            render::compaction(out, &cluster.compact_staging()?)?;
         }
         "v1-export" => {
             let path = args.path("output")?;

@@ -42,7 +42,13 @@ overridden by `PARITYBAY_ROOT` or the global `--root` option.
   `replan ID` to replace the reservation before retrying. `abort ID`
   releases it. A successfully published upload uses its ID as its object
   generation, so `stat KEY` can resolve a lost finish response while that
-  generation is current.
+  generation is current. Sessions created before the compact staging
+  upgrade keep their loose one-file-per-part layout and remain fully
+  writable; `compact-staging` packs an upload's current parts into
+  contiguous numbered pack files described by a `staging.v2` sidecar.
+  Loose and packed parts can coexist, and finish always assembles from the
+  current part receipts, never from a superseded revision or a neighbour's
+  pack extent.
 - **Get** pins an object generation and its receipt mapping. `--range
   START:END` is half-open, `START:` reads to EOF, and `:SIZE` reads a
   suffix of up to that size. Invalid endpoints are rejected. For each
@@ -91,8 +97,12 @@ filesystem's durability semantics. Cleanup is separate from publication.
 A pinned reader or repair can continue using its old receipt mapping after
 replacement, deletion or relocation. `gc` defers while it cannot acquire
 an exclusive cleanup lock. It reclaims retired and unreferenced managed
-files, including abandoned staging data and temporary files. Retired
-fragments continue charging the owning node until cleanup.
+files, including abandoned staging data and temporary files. For compact
+staging it reconciles each sidecar against the catalog's current part
+receipts, keeps every referenced pack and removes orphan packs, loose
+parts and drafts; a pinned completion or repair blocks cleanup for its
+whole duration. Retired fragments continue charging the owning node until
+cleanup.
 
 The cluster root owns `catalog.v1`, lock files, `nodes/ID/fragments` and
 `uploads/ID`. Node and upload file names carry the generation or session
@@ -140,6 +150,7 @@ inject a `Checkpoint` directly.
 | Directory | Responsibility |
 |---|---|
 | `src/upload` | Reservations, part staging, conditional object publication |
+| `src/staging` | v2 compact packs, sidecar frames, mixed-layout reads and compaction |
 | `src/manifest` | v1 frame, metadata invariants, catalog and process locks |
 | `src/codec` | Stripe geometry, XOR reconstruction, CRC32C |
 | `src/placement` | Node states, byte accounting, domain-aware placement |

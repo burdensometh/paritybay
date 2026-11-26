@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::files;
 use crate::manifest::FragmentAddress;
+use crate::staging::{is_index_name, pack_id, upload_directories};
 use crate::{Catalog, Cluster, Error, NodeState, RepairState, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -94,7 +95,7 @@ impl Cluster {
     fn collect_staging(&self, catalog: &Catalog, report: &mut CollectionReport) -> Result<()> {
         let root = self.root.join("uploads");
         let mut dir_removed = false;
-        for entry in files::entries(&root)? {
+        for entry in upload_directories(self.root())? {
             let name = entry.file_name();
             let Some(id) = name.to_str().and_then(upload_id) else {
                 continue;
@@ -108,11 +109,26 @@ impl Cluster {
                 continue;
             }
             let upload = catalog.uploads.get(&id);
-            let active: BTreeSet<_> = upload
+            // Loose parts named by current (number, revision) receipts stay.
+            let active_loose: BTreeSet<_> = upload
                 .into_iter()
                 .flat_map(|upload| upload.parts.values())
                 .map(|part| self.part_path(id, part.number, part.revision))
                 .collect();
+            // Packs named by the current sidecar stay. A sidecar that cannot be
+            // decoded fails the GC run rather than deleting data it cannot
+            // account for. When the catalog no longer knows the session, its
+            // sidecar and every pack it names are abandoned and reclaimed.
+            let active_packs: BTreeSet<u64> = if let Some(session) = upload {
+                // Reclaim extents an interrupted put_part left beyond the
+                // catalog's current receipts before deciding which packs stay.
+                let live: BTreeSet<u64> =
+                    session.parts.values().map(|part| part.revision).collect();
+                self.reconcile_index(id, &live)?;
+                self.referenced_packs(id)?.into_keys().collect()
+            } else {
+                BTreeSet::new()
+            };
 
             let before = report.staging_files + report.temporary_files;
             for staged in files::entries(&dir)? {
@@ -123,7 +139,17 @@ impl Cluster {
                 };
                 if is_draft(name) {
                     report.temporary_files += usize::from(files::remove_file(&path)?);
-                } else if is_part(name) && !active.contains(&path) {
+                } else if is_part(name) {
+                    if !active_loose.contains(&path) {
+                        report.staging_files += usize::from(files::remove_file(&path)?);
+                    }
+                } else if let Some(pack) = pack_id(name) {
+                    if !active_packs.contains(&pack) {
+                        report.staging_files += usize::from(files::remove_file(&path)?);
+                    }
+                } else if is_index_name(name) && upload.is_none() {
+                    // A sidecar without a catalog session can only reference
+                    // abandoned packs; drop the index alongside its packs.
                     report.staging_files += usize::from(files::remove_file(&path)?);
                 }
             }

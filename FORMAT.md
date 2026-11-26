@@ -62,6 +62,49 @@ stripe and revision. `H` is a shard number 0–2. Staged parts live at
 `uploads/UUUUUUUUUUUUUUUU/PPPPPPPP-RRRRRRRRRRRRRRRR.part` with the same
 number encoding. The file length and CRC are stored in the receipt.
 
+## Staged parts (v2 compact layout)
+
+A pre-upgrade upload keeps one loose `.part` file per revision and works
+unchanged; such a session can still replace parts, fill gaps and finish.
+Once an upload directory contains a `staging.v2` sidecar, new parts go
+into numbered pack files and the two layouts can coexist. Reads and
+finish always assemble from the catalog's part receipts — part number,
+current revision and the receipt's effective length — so a superseded
+revision or the neighbouring part in the same pack is never read.
+
+Pack files are named `uploads/UUUUUUUUUUUUUUUU/NNNNNNNNNNNNNNNN.pack`
+with a zero-padded lowercase hexadecimal id. A pack holds one or more
+extents appended in revision order; each extent is exactly one part.
+Readers seek to the recorded offset and read exactly the recorded
+length, then verify the receipt CRC, so an extent can never pull in a
+neighbour's bytes. Replacing a part appends a fresh extent in a new pack
+and prunes the superseded revision from the sidecar without rewriting
+any live extent.
+
+The sidecar `staging.v2` uses the same frame layout as the catalog:
+the eight byte magic `PBAYSIDX`, a little endian `u32` payload length,
+a CRC32C over the payload, then the payload. Its payload is a `u32`
+count followed by one record per current part revision, ordered by
+revision with no duplicates:
+
+```text
+extent = revision:u64 pack:u64 offset:u64 length:u32 crc32c:u32
+```
+
+The sidecar is keyed by revision, not part number, so every record maps
+one current revision to one extent; the catalog remains the authority
+for which revision each part number points at. The catalog itself stays
+on the v1 wire format and never embeds pack bytes.
+
+A compaction (`compact-staging`) verifies each loose part against its
+receipt, appends it to a pack and publishes the sidecar before unlinking
+the loose file. A crash leaves either the loose file usable or a durable
+packed extent; rerunning skips parts already packed. `gc` rewrites a
+sidecar to drop revisions the catalog no longer references, keeps every
+pack a current sidecar names, reclaims orphan packs, loose parts and
+drafts, and removes the whole directory once the catalog session ends.
+
+
 The logical stripe width is twice `block_bytes`. In a short stripe shard
 1 can be shorter than shard 0, including zero bytes. XOR treats absent tail
 bytes of shard 1 as zeros, stores parity to the length of shard 0 and

@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod placement;
 pub mod readpath;
 pub mod repair;
+pub mod staging;
 pub mod upload;
 
 mod boundary;
@@ -17,7 +18,8 @@ pub use config::{parse_node, Config};
 pub use error::{Error, Result};
 pub use manifest::{
     Catalog, Condition, DomainPolicy, FragmentReceipt, Media, NodeDomain, NodeState,
-    ObjectGeneration, RepairAttempt, RepairKind, RepairState, StripeManifest, UploadSession,
+    ObjectGeneration, PartReceipt, RepairAttempt, RepairKind, RepairState, StripeManifest,
+    UploadSession,
 };
 
 use std::path::{Path, PathBuf};
